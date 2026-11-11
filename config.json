@@ -1,0 +1,30 @@
+{
+ "boardName": "world-mayan",
+ "agents": [
+  {
+   "name": "tony-stark",
+   "color": "--dev",
+   "defModel": "anthropic.Polaris.Model.Smart.High"
+  },
+  {
+   "name": "dr-strange",
+   "color": "--plan",
+   "defModel": "anthropic.Claude.Sonnet"
+  },
+  {
+   "name": "vision",
+   "color": "--arch",
+   "defModel": "anthropic.Claude.Sonnet"
+  },
+  {
+   "name": "hawkeye",
+   "color": "--qa",
+   "defModel": "anthropic.Polaris.Model.Smart.High"
+  },
+  {
+   "name": "spiderman",
+   "color": "--doc",
+   "defModel": "anthropic.Claude.Sonnet"
+  }
+ ]
+}

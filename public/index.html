@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orchestrator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <div class="wordmark"><span id="board-name">orchestrator</span><span class="path">/~team</span><span class="cursor" aria-hidden="true"></span></div>
+  <div class="clock" id="clock">--:--<span class="secs">:--</span></div>
+  <div class="spacer"></div>
+  <button type="button" class="ghost header-btn" id="teams-btn" title="rename the board and its agents">teams</button>
+  <div class="conc" id="conc">slots --</div>
+  <div class="sse" id="sse" title="live feed"></div>
+</header>
+
+<div class="wrap">
+
+  <!-- ---------------------------------------------- dispatch rail -->
+  <aside class="rail">
+    <form id="dispatch-form">
+      <h2>Dispatch</h2>
+
+      <div class="field">
+        <label>Agent</label>
+        <div class="agent-picker" id="agent-picker" role="radiogroup"></div>
+      </div>
+
+      <div class="field">
+        <label for="f-repo">Repo <span class="hint">optional — the agent works here</span></label>
+        <div class="repo-wrap">
+          <input id="f-repo" type="text" spellcheck="false" placeholder="~/Coding/Self/orchestrator" autocomplete="off">
+          <div class="repo-sug" id="repo-sug" hidden></div>
+        </div>
+        <div class="repo-quick" id="repo-quick"></div>
+      </div>
+
+      <div class="field">
+        <label for="f-task">Task <span class="hint">— or pick a preset</span></label>
+        <div class="presets" id="presets">
+          <button type="button" class="preset" data-preset="demo" title="spiderman builds + browser-verifies an HTML demo">demo</button>
+          <button type="button" class="preset" data-preset="jira" title="hawkeye pulls the ticket and drafts the context pack">jira context</button>
+        </div>
+        <textarea id="f-task" rows="7" spellcheck="false" placeholder="what should the agent do?"></textarea>
+      </div>
+
+      <div class="field row">
+        <div class="field grow">
+          <label for="f-model">Model</label>
+          <select id="f-model"></select>
+        </div>
+        <label class="check">
+          <input type="checkbox" id="f-auto" checked>
+          <span>auto-approve tools</span>
+        </label>
+      </div>
+
+      <button class="submit" id="submit" type="submit">Dispatch<span class="arrow" aria-hidden="true"> ⇥</span></button>
+      <div class="form-msg" id="form-msg" role="status"></div>
+    </form>
+
+    <div class="rail-note">
+      Terminal equivalent: <code>orch "&lt;task&gt;" --agent developer</code>
+    </div>
+  </aside>
+
+  <!-- ---------------------------------------------- board -->
+  <main class="board">
+
+    <section class="lanes" id="lanes"></section>
+
+    <section class="ledger">
+      <div class="ledger-head">
+        <h2>Ledger</h2>
+        <span class="ledger-sub" id="ledger-summary"></span>
+        <div class="spacer"></div>
+        <button type="button" class="ghost" id="clear-btn">clear finished</button>
+      </div>
+      <table>
+        <thead>
+          <tr><th class="t-time">date · time</th><th class="t-proj">project</th><th class="t-agent">agent</th><th class="t-task">task</th><th class="t-dur">took</th><th class="t-cost">cost</th><th class="t-status">status</th><th class="t-act"></th></tr>
+        </thead>
+        <tbody id="ledger-body"></tbody>
+      </table>
+      <div class="ledger-empty" id="ledger-empty">nothing finished yet — dispatched tasks land here when they wrap up.</div>
+    </section>
+
+  </main>
+</div>
+
+<!-- task detail drawer -->
+<div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+<div class="drawer" id="drawer" hidden aria-modal="true" role="dialog" aria-labelledby="drawer-title">
+  <div class="drawer-head">
+    <h3 id="drawer-title">task</h3>
+    <button type="button" class="ghost" id="drawer-close">esc</button>
+  </div>
+  <div class="drawer-meta" id="drawer-meta"></div>
+  <pre class="drawer-task" id="drawer-task"></pre>
+  <h4>activity</h4>
+  <div class="drawer-activity" id="drawer-activity"></div>
+  <h4>result</h4>
+  <pre class="drawer-result" id="drawer-result"></pre>
+  <div class="drawer-actions" id="drawer-actions"></div>
+</div>
+
+<!-- teams dialog: rename the board + manage the agent roster -->
+<div class="drawer-backdrop" id="teams-backdrop" hidden></div>
+<div class="teams" id="teams" hidden aria-modal="true" role="dialog" aria-labelledby="teams-title">
+  <div class="teams-head">
+    <h3 id="teams-title">teams</h3>
+    <button type="button" class="ghost" id="teams-close">esc</button>
+  </div>
+  <div class="teams-body" id="teams-body"></div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
