@@ -1,0 +1,603 @@
+#!/usr/bin/env node
+'use strict';
+/*
+ * orch — terminal client for the orchestrator board.
+ *
+ *   orch "task text" [--agent tony-stark|dr-strange|vision|hawkeye|spiderman]
+ *        [--repo ~/Coding/Self/project] [--model <model>] [--no-auto]
+ *        [--priority] [--wait]
+ *   orch ls                      queued + running tasks
+ *   orch ps                      running tasks with latest activity
+ *   orch log [n]                 last n finished tasks (default 10)
+ *   orch result <id>             full result of one task
+ *   orch cancel <id>             cancel a queued/running task
+ *   orch retry <id>              requeue a failed/cancelled task
+ *   orch waiting                 tasks paused on a question for Prateek
+ *   orch answer <id> "text"      answer a waiting task — resumes its session
+ *   orch follow <id> "instr"     follow-up — resumes the task's session when
+ *                                its transcript survives, else runs fresh
+ *                                with a full-context file
+ *   orch status                  server + queue summary
+ *   orch agents                  the board's agent roster (renames show up here)
+ *   orch ui                      open the board in a browser
+ *   orch start | stop | restart  manage the server (launchd LaunchAgent —
+ *                                survives terminal closes, auto-starts at
+ *                                login, restarts after a crash)
+ *   orch server                  run the server in the foreground
+ *
+ * Server: http://127.0.0.1:7171 (override with ORCH_URL)
+ */
+
+const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawn } = require('child_process');
+
+const HOME = os.homedir();
+const APP_DIR = path.join(HOME, 'Coding/Self/orchestrator');
+const SERVER_JS = path.join(APP_DIR, 'server.js');
+const PID_FILE = path.join(APP_DIR, 'server.pid');
+const BASE = process.env.ORCH_URL || 'http://127.0.0.1:7171';
+
+// The roster lives on the board (config.json) and is editable from the UI's
+// teams dialog — fetch it, fall back to last known / bare names if offline.
+let AGENTS = ['tony-stark', 'dr-strange', 'vision', 'hawkeye', 'spiderman'];
+const AGENT_COLORS = {
+  '--dev': '\x1b[33m',    // orange
+  '--plan': '\x1b[36m',   // cyan
+  '--arch': '\x1b[35m',   // magenta
+  '--qa': '\x1b[32m',     // green
+  '--doc': '\x1b[93m',    // yellow
+};
+const FALLBACK_AGENTS = AGENTS.slice();
+// Normalize a state payload's roster: new servers send an array of
+// {name, color, defModel}; legacy servers send a name->def map.
+function rosterFrom(state) {
+  if (Array.isArray(state.agents) && state.agents.length) return state.agents;
+  if (state.agents && typeof state.agents === 'object') {
+    return Object.entries(state.agents).map(([name, v], i) => ({
+      name,
+      color: ['--dev', '--plan', '--arch', '--qa', '--doc'][i % 5],
+      defModel: v && v.defModel ? v.defModel : '',
+    }));
+  }
+  return [];
+}
+async function refreshAgents() {
+  try {
+    const s = await request('GET', '/api/state');
+    const roster = rosterFrom(s);
+    if (roster.length) {
+      AGENTS = roster.map(a => a.name);
+      for (const a of roster) colorByAgent[a.name] = AGENT_COLORS[a.color] || '';
+    }
+  } catch (e) { /* offline — keep the fallback names */ }
+}
+const colorByAgent = {};
+const RESET = '\x1b[0m';
+const DIM = (s) => `\x1b[2m${s}\x1b[0m`;
+const BOLD = (s) => `\x1b[1m${s}\x1b[0m`;
+const color = (agent, s) => (colorByAgent[agent] || '') + s + RESET;
+const USE_COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
+
+function paint(fn, s) { return USE_COLOR ? fn(s) : s; }
+function agentColor(agent, s) { return USE_COLOR ? color(agent, s) : s; }
+
+// ------------------------------------------------------------------ http ---
+
+function request(method, p, body) {
+  return new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const req = http.request(
+      `${BASE}${p}`,
+      {
+        method,
+        headers: data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {},
+        timeout: 5000,
+      },
+      (res) => {
+        let buf = '';
+        res.on('data', (c) => { buf += c; });
+        res.on('end', () => {
+          let j = null;
+          try { j = buf ? JSON.parse(buf) : null; } catch (e) { /* non-JSON */ }
+          if (res.statusCode >= 400) {
+            reject(new Error((j && j.error) || `HTTP ${res.statusCode}`));
+          } else {
+            resolve(j);
+          }
+        });
+      }
+    );
+    req.on('error', (e) => reject(new Error(`server unreachable at ${BASE} (${e.message}) — try: orch start`)));
+    req.on('timeout', () => { req.destroy(); reject(new Error(`timeout talking to ${BASE}`)); });
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+// ---------------------------------------------------------------- render ---
+
+function fmtDur(ms) {
+  if (!ms || ms < 0) return '—';
+  if (ms < 60000) return `${Math.max(1, Math.round(ms / 1000))}s`;
+  const m = Math.floor(ms / 60000);
+  const s = Math.round((ms % 60000) / 1000);
+  return `${m}m${String(s).padStart(2, '0')}s`;
+}
+function fmtTime(ts) {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+function shortRepo(p) {
+  if (!p) return '';
+  const parts = p.split('/').filter(Boolean);
+  return parts[parts.length - 1] || p;
+}
+function shortModel(m) {
+  return m
+    .replace('anthropic.Polaris.Model.Smart.', 'polaris.')
+    .replace('anthropic.Claude.', 'claude.')
+    .replace('anthropic.OpenAI.', 'openai.')
+    .replace('anthropic.Zai.', 'zai.');
+}
+function oneLine(s, n) {
+  return String(s || '').replace(/\s+/g, ' ').trim().slice(0, n);
+}
+function lastActivity(t) {
+  const a = t.activity && t.activity[t.activity.length - 1];
+  if (!a) return '';
+  const prefix = a.kind === 'tool' && a.tool ? `${a.tool}: ` : '';
+  return oneLine(prefix + a.text, 60);
+}
+
+// ----------------------------------------------------------------- cmds ---
+
+async function cmdDispatch(argv) {
+  const textParts = [];
+  const opts = { agent: 'tony-stark', repo: '', model: '', auto: true, wait: false, priority: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--agent') opts.agent = argv[++i];
+    else if (a === '--repo') opts.repo = argv[++i];
+    else if (a === '--model') opts.model = argv[++i];
+    else if (a === '--no-auto') opts.auto = false;
+    else if (a === '--wait') opts.wait = true;
+    else if (a === '--priority') opts.priority = true;
+    else if (a === '-a' || a === '-r' || a === '-m') {
+      const map = { '-a': 'agent', '-r': 'repo', '-m': 'model' };
+      opts[map[a]] = argv[++i];
+    } else textParts.push(a);
+  }
+  const text = textParts.join(' ').trim();
+  if (!text) {
+    console.error('usage: orch "task text" --agent tony-stark [--repo path] [--model m] [--no-auto] [--priority] [--wait]');
+    process.exit(2);
+  }
+  // The server validates the name against its live roster; only catch the
+  // case where the agent was removed or renamed since the roster was fetched.
+  if (!AGENTS.includes(opts.agent)) {
+    console.error(`unknown agent "${opts.agent}" — orch agents lists the current roster`);
+    process.exit(2);
+  }
+  const body = { agent: opts.agent, task: text, autoApprove: opts.auto, priority: opts.priority };
+  if (opts.repo) body.repo = opts.repo;
+  if (opts.model) body.model = opts.model;
+  const t = await request('POST', '/api/tasks', body);
+  console.log(`${DIM('queued')} ${BOLD(t.id)} → ${agentColor(t.agent, t.agent)} ${t.repo ? DIM(shortRepo(t.repo)) : ''}`);
+  if (!opts.wait) {
+    console.log(DIM(`watch: orch ps · detail: orch result ${t.id}`));
+    return;
+  }
+  // --wait: poll until the task reaches a terminal status — 'waiting' keeps
+  // blocking (documented v1 semantics: the loop does not answer questions).
+  process.stderr.write(DIM('waiting for completion'));
+  let shown = 0;
+  let waitNoted = false;
+  while (['queued', 'running', 'waiting'].includes(t.status)) {
+    if (t.status === 'waiting' && !waitNoted) {
+      waitNoted = true;
+      process.stderr.write(DIM(`\n  ⏸ ${t.id} is waiting for an answer (orch answer ${t.id} "text") — still blocking`));
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+    let cur = null;
+    try { cur = (await request('GET', '/api/state')).tasks.find(x => x.id === t.id); } catch (e) { break; }
+    if (!cur) break;
+    if (cur.status === 'running') {
+      const lines = (cur.activity || []).slice(shown);
+      for (const a of lines) {
+        shown++;
+        const tag = a.kind === 'tool' ? DIM(a.tool || 'tool') : agentColor(cur.agent, a.kind);
+        console.error(`  ${DIM(fmtTime(a.at))} ${tag} ${DIM(oneLine(a.text, 90))}`);
+      }
+    }
+    Object.assign(t, cur);
+  }
+  console.log('');
+  const mark = t.status === 'done' ? paint(() => '\x1b[32m✓\x1b[0m', '✓') : paint(() => '\x1b[31m✗\x1b[0m', '✗');
+  console.log(`${mark} ${t.status} ${DIM(`(${fmtDur(t.durationMs)}${t.costUsd != null ? `, $${t.costUsd.toFixed(2)}` : ''})`)}`);
+  if (t.result) console.log(t.result);
+  if (t.error) console.error(`${BOLD('error:')} ${t.error}`);
+  process.exitCode = t.status === 'done' ? 0 : 1;
+}
+
+async function cmdLs() {
+  const s = await request('GET', '/api/state');
+  const active = s.tasks.filter(t => ['queued', 'running', 'waiting'].includes(t.status))
+    .sort((a, b) => a.createdAt - b.createdAt);
+  if (!active.length) { console.log(DIM('no queued or running tasks')); return; }
+  for (const t of active) {
+    const tag = t.status === 'running' ? BOLD('run') : t.status === 'waiting' ? paint(() => '\x1b[36mwait\x1b[0m', 'wait') : DIM('queued');
+    console.log(`${tag}  ${BOLD(t.id)}  ${agentColor(t.agent, t.agent.padEnd(9))} ${DIM(oneLine(t.status === 'waiting' && t.ask ? `❓ ${t.ask.question}` : t.task, 64))}`);
+  }
+  const running = active.filter(t => t.status === 'running').length;
+  const waiting = active.filter(t => t.status === 'waiting').length;
+  console.log(DIM(`\n${running}/${s.concurrency} slots busy · ${active.length - running - waiting} queued${waiting ? ` · ${waiting} waiting` : ''}`));
+}
+
+async function cmdPs() {
+  const s = await request('GET', '/api/state');
+  const running = s.tasks.filter(t => t.status === 'running');
+  for (const t of running) {
+    console.log(`${BOLD(t.id)} ${agentColor(t.agent, t.agent)} ${DIM(shortModel(t.model))} ${DIM(`elapsed ${fmtDur(Date.now() - t.startedAt)}`)}`);
+    console.log(`  ${oneLine(t.task, 90)}`);
+    const acts = (t.activity || []).slice(-5);
+    for (const a of acts) {
+      const tag = a.kind === 'tool' ? a.tool || 'tool' : a.kind;
+      console.log(`  ${DIM(tag.padEnd(12))} ${DIM(oneLine(a.text, 78))}`);
+    }
+    console.log('');
+  }
+  const waiting = s.tasks.filter(t => t.status === 'waiting');
+  for (const t of waiting) {
+    console.log(`${BOLD(t.id)} ${agentColor(t.agent, t.agent)} ${DIM(shortModel(t.model))} ${paint(() => '\x1b[36m', '')}waiting ${fmtDur(Date.now() - (t.ask?.askedAt || t.startedAt || Date.now()))}${RESET}`);
+    console.log(`  ❓ ${t.ask?.question || oneLine(t.task, 80)}`);
+    if (t.ask?.options?.length) console.log(`  ${DIM(`options: ${t.ask.options.join(' / ')}`)}`);
+    console.log(`  ${DIM(`answer with: orch answer ${t.id} "text"`)}`);
+    console.log('');
+  }
+  if (!running.length && !waiting.length) { console.log(DIM('nothing running or waiting')); return; }
+}
+
+async function cmdWaiting() {
+  const s = await request('GET', '/api/state');
+  const waiting = s.tasks.filter(t => t.status === 'waiting')
+    .sort((a, b) => (a.ask?.askedAt || 0) - (b.ask?.askedAt || 0));
+  if (!waiting.length) { console.log(DIM('nothing waiting')); return; }
+  for (const t of waiting) {
+    console.log(`${paint(() => '\x1b[36m⏸\x1b[0m', '⏸')}  ${BOLD(t.id)}  ${agentColor(t.agent, t.agent)} ${t.repo ? DIM(shortRepo(t.repo)) : ''} — ${oneLine(t.ask?.question || t.task, 70)}`);
+    if (t.ask?.options?.length) console.log(`     ${DIM(`options: ${t.ask.options.join(' / ')}`)}`);
+    console.log(`     ${DIM(`waiting ${fmtDur(Date.now() - (t.ask?.askedAt || Date.now()))}`)}`);
+  }
+  console.log(DIM(`\nanswer with: orch answer <id> "text"`));
+}
+
+async function cmdAnswer(id, textParts) {
+  if (!id) { console.error('usage: orch answer <id> "your answer"'); process.exit(2); }
+  const text = (textParts || []).join(' ').trim();
+  if (!text) { console.error('give the answer after the id'); process.exit(2); }
+  const t = await request('POST', `/api/tasks/${id}/answer`, { text });
+  console.log(`${DIM('answered')} ${BOLD(t.id)} ${DIM('→ requeued (priority) — resumes its session when a slot frees')}`);
+}
+
+async function cmdLog(nArg) {
+  const n = parseInt(nArg || '10', 10) || 10;
+  const s = await request('GET', '/api/state');
+  const fin = s.tasks.filter(t => !['queued', 'running'].includes(t.status))
+    .sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0))
+    .slice(0, n);
+  if (!fin.length) { console.log(DIM('nothing finished yet')); return; }
+  const mark = { done: paint(() => '\x1b[32m✓\x1b[0m', '✓'), failed: paint(() => '\x1b[31m✗\x1b[0m', '✗'), cancelled: DIM('−') };
+  for (const t of fin) {
+    const m = mark[t.status] || ' ';
+    console.log(`${m} ${BOLD(t.id)} ${DIM(fmtTime(t.finishedAt))} ${agentColor(t.agent, t.agent.padEnd(9))} ${oneLine(t.task, 56)} ${DIM(fmtDur(t.durationMs))}${t.costUsd != null ? DIM(` $${t.costUsd.toFixed(2)}`) : ''}`);
+  }
+}
+
+async function cmdResult(id) {
+  if (!id) { console.error('usage: orch result <id>'); process.exit(2); }
+  const s = await request('GET', '/api/state');
+  const t = s.tasks.find(x => x.id === id);
+  if (!t) { console.error(`no such task: ${id}`); process.exit(1); }
+  console.log(`${BOLD(t.id)} ${agentColor(t.agent, t.agent)} ${t.status} ${DIM(`${shortRepo(t.repo)} · ${shortModel(t.model)}`)}`);
+  console.log(DIM('─'.repeat(60)));
+  console.log(t.task);
+  console.log(DIM('─'.repeat(60)));
+  if (t.result) console.log(t.result);
+  if (t.error) console.error(`${BOLD('error:')} ${t.error}`);
+  if (!t.result && !t.error) console.log(DIM(t.status === 'running' ? 'still running — check orch ps' : 'no result captured'));
+}
+
+async function cmdFollow(args) {
+  const id = args.find(a => !a.startsWith('--'));
+  if (!id) {
+    console.error('usage: orch follow <id> "follow-up instruction" [--agent a] [--model m] [--no-auto] [--priority] [--wait]');
+    process.exit(2);
+  }
+  const textParts = [];
+  const overrides = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--agent') overrides.agent = args[++i];
+    else if (a === '--model') overrides.model = args[++i];
+    else if (a === '--no-auto') overrides.auto = false;
+    else if (a === '--priority') overrides.priority = true;
+    else if (a === '--wait') overrides.wait = true;
+    else if (!a.startsWith('--')) textParts.push(a);
+  }
+  textParts.shift(); // drop the id
+  const instruction = textParts.join(' ').trim();
+  if (!instruction) {
+    console.error('give the follow-up instruction after the id');
+    process.exit(2);
+  }
+
+  const s = await request('GET', '/api/state');
+  const t = s.tasks.find(x => x.id === id);
+  if (!t) { console.error(`no such task: ${id}`); process.exit(1); }
+  if (!['done', 'failed', 'cancelled'].includes(t.status)) {
+    console.error(`${t.id} is still ${t.status} — wait for it to finish before following up`);
+    process.exit(1);
+  }
+
+  const body = {
+    agent: overrides.agent || t.agent,
+    repo: t.repo,
+    task: instruction,
+    model: overrides.model || t.model,
+    autoApprove: overrides.auto === undefined ? t.autoApprove : overrides.auto,
+    parentId: t.id,
+    followTo: t.id,          // server resumes t's session when the transcript survives
+    priority: !!overrides.priority,
+  };
+  const nt = await request('POST', '/api/tasks', body);
+  console.log(`${DIM('follow-up')} ${BOLD(nt.id)} → ${agentColor(nt.agent, nt.agent)} ${DIM(`(context from ${t.id}${nt.resumeSessionId ? ' · resumed' : ''})`)}`);
+  if (overrides.wait) {
+    // simple poll loop for --wait (blocks through 'waiting' like cmdDispatch)
+    while (['queued', 'running', 'waiting'].includes(nt.status)) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const cur = (await request('GET', '/api/state')).tasks.find(x => x.id === nt.id);
+      if (!cur) break;
+      Object.assign(nt, cur);
+    }
+    const mark = nt.status === 'done' ? paint(() => '\x1b[32m✓\x1b[0m', '✓') : paint(() => '\x1b[31m✗\x1b[0m', '✗');
+    console.log(`${mark} ${nt.status} ${DIM(`(${fmtDur(nt.durationMs)}${nt.costUsd != null ? `, $${nt.costUsd.toFixed(2)}` : ''})`)}`);
+    if (nt.result) console.log(nt.result);
+    if (nt.error) console.error(`${BOLD('error:')} ${nt.error}`);
+    process.exitCode = nt.status === 'done' ? 0 : 1;
+  } else {
+    console.log(DIM(`watch: orch ps · detail: orch result ${nt.id}`));
+  }
+}
+
+async function cmdCancel(id) {
+  if (!id) { console.error('usage: orch cancel <id>'); process.exit(2); }
+  const t = await request('POST', `/api/tasks/${id}/cancel`);
+  console.log(`${DIM('cancelled')} ${t.id}`);
+}
+
+async function cmdRetry(id) {
+  if (!id) { console.error('usage: orch retry <id>'); process.exit(2); }
+  const t = await request('POST', `/api/tasks/${id}/retry`);
+  console.log(`${DIM('requeued as')} ${BOLD(t.id)}`);
+}
+
+async function cmdStatus() {
+  try {
+    const h = await request('GET', '/health');
+    const s = await request('GET', '/api/state');
+    const running = s.tasks.filter(t => t.status === 'running').length;
+    const queued = s.tasks.filter(t => t.status === 'queued').length;
+    const fin = s.tasks.filter(t => !['queued', 'running'].includes(t.status));
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const todayFin = fin.filter(t => (t.finishedAt || 0) >= today.getTime());
+    const cost = todayFin.reduce((sum, t) => sum + (t.costUsd || 0), 0);
+    console.log(`orchestrator ${DIM(`pid ${h.pid} · up ${fmtDur(h.uptime * 1000)} · ${BASE}`)}`);
+    console.log(`running ${BOLD(String(running))}${DIM(`/${s.concurrency}`)} · queued ${BOLD(String(queued))} · finished ${fin.length} (${todayFin.length} today, $${cost.toFixed(2)})`);
+  } catch (e) {
+    console.error(e.message);
+    process.exit(1);
+  }
+}
+
+async function cmdAgents() {
+  try {
+    const s = await request('GET', '/api/state');
+    const roster = rosterFrom(s);
+    if (!roster.length) { console.log(DIM('no agents on the board')); return; }
+    for (const a of roster) {
+      const busy = a.busy ? BOLD(' ● busy') : '';
+      const desc = a.description ? DIM(` — ${oneLine(a.description, 60)}`) : '';
+      console.log(`${agentColor(a.name, a.name.padEnd(14))} ${DIM(a.defModel)}${busy}${desc}`);
+    }
+    console.log(DIM(`\nrename/recolor/remove in the UI: orch ui → teams`));
+  } catch (e) {
+    console.error(e.message);
+    process.exit(1);
+  }
+}
+
+async function cmdStop() {
+  let pid = null;
+  try { pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10); } catch (e) { /* no pid file */ }
+  if (!pid) {
+    console.log(DIM('no server pid file — not running?'));
+    return;
+  }
+  try { process.kill(pid, 0); } catch (e) {
+    console.log(DIM('stale pid file, removing'));
+    fs.unlinkSync(PID_FILE);
+    return;
+  }
+  process.kill(pid, 'SIGTERM');
+  console.log(`${DIM('stopped')} pid ${pid}`);
+}
+
+// -------------------------------------------------------- server control ---
+//
+// The server runs as a LaunchAgent (com.pdesai.orchestrator), so it survives
+// terminal closes and reboots and launchd restarts it after a crash. The
+// plist is regenerated whenever its desired content drifts — e.g. an nvm
+// default upgrade moves the node binary — and re-registered on next start.
+
+const LAUNCH_LABEL = 'com.pdesai.orchestrator';
+const PLIST_FILE = path.join(HOME, 'Library', 'LaunchAgents', `${LAUNCH_LABEL}.plist`);
+
+function guiDomain() { return `gui/${process.getuid()}`; }
+
+function launchctl(args) {
+  return new Promise((resolve) => {
+    const child = spawn('/bin/launchctl', args, { stdio: 'ignore' });
+    child.on('exit', (code) => resolve(code === 0));
+    child.on('error', () => resolve(false));
+  });
+}
+function bootOut() { return launchctl(['bootout', `${guiDomain()}/${LAUNCH_LABEL}`]); }
+function bootStrap() { return launchctl(['bootstrap', guiDomain(), PLIST_FILE]); }
+
+const xmlEsc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function plistXml() {
+  const nodeBin = process.execPath; // whatever node runs this CLI
+  const pathEnv = [
+    path.dirname(nodeBin),           // node + the claude CLI live here
+    path.join(HOME, '.local/bin'),
+    '/opt/homebrew/bin', '/usr/local/bin',
+    '/usr/bin', '/bin', '/usr/sbin', '/sbin',
+  ].join(':');
+  const log = path.join(APP_DIR, 'server.log');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>${LAUNCH_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${xmlEsc(nodeBin)}</string>
+        <string>${xmlEsc(SERVER_JS)}</string>
+    </array>
+    <key>WorkingDirectory</key><string>${xmlEsc(APP_DIR)}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key><string>${xmlEsc(HOME)}</string>
+        <key>PATH</key><string>${xmlEsc(pathEnv)}</string>
+    </dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>ThrottleInterval</key><integer>10</integer>
+    <key>StandardOutPath</key><string>${xmlEsc(log)}</string>
+    <key>StandardErrorPath</key><string>${xmlEsc(log)}</string>
+</dict>
+</plist>
+`;
+}
+
+async function healthy() {
+  try { await request('GET', '/health'); return true; } catch (e) { return false; }
+}
+
+async function cmdStart() {
+  if (await healthy()) {
+    const h = await request('GET', '/health');
+    console.log(`${DIM('already running —')} pid ${h.pid} · ${BASE}`);
+    return;
+  }
+  if (!fs.existsSync(SERVER_JS)) {
+    console.error(`server not found: ${SERVER_JS}`);
+    process.exit(1);
+  }
+  fs.mkdirSync(path.dirname(PLIST_FILE), { recursive: true });
+  const want = plistXml();
+  let stale = true;
+  try { stale = fs.readFileSync(PLIST_FILE, 'utf8') !== want; } catch (e) { /* first run */ }
+  if (stale) fs.writeFileSync(PLIST_FILE, want);
+  await bootOut(); // clear a stale registration quietly
+  await new Promise((r) => setTimeout(r, 400));
+  if (!(await bootStrap())) {
+    console.error(`launchctl bootstrap failed — inspect ${PLIST_FILE}`);
+    process.exit(1);
+  }
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    if (await healthy()) {
+      console.log(`${paint(() => '\x1b[32m●\x1b[0m', '●')} orchestrator on ${BASE} ${DIM(`launchd ${LAUNCH_LABEL} · log ${APP_DIR}/server.log`)}`);
+      return;
+    }
+  }
+  console.error('server did not come up — check server.log');
+  process.exit(1);
+}
+
+async function cmdStop() {
+  await bootOut();
+  for (let i = 0; i < 10; i++) {
+    if (!(await healthy())) { console.log(`${DIM('stopped')} ${DIM(`(${LAUNCH_LABEL} bootstrapped out)`)}`); return; }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  // A pre-launchd server started detached isn't owned by launchd — kill via pid file.
+  try {
+    const pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
+    process.kill(pid, 'SIGTERM');
+  } catch (e) { /* no pid file / already gone */ }
+  for (let i = 0; i < 10; i++) {
+    if (!(await healthy())) { console.log(`${DIM('stopped')} ${DIM('(legacy detached server)')}`); return; }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  console.error('server did not stop — check server.log');
+  process.exit(1);
+}
+
+async function cmdRestart() {
+  await cmdStop().catch(() => {});
+  await new Promise((r) => setTimeout(r, 500));
+  await cmdStart();
+}
+
+function cmdUi() {
+  const open = process.platform === 'darwin' ? 'open' : 'xdg-open';
+  const child = spawn(open, [BASE], { stdio: 'ignore', detached: true });
+  child.unref();
+  console.log(`${DIM('opening')} ${BASE}`);
+}
+
+// ----------------------------------------------------------------- main ---
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const cmd = argv[0] || 'status';
+  await refreshAgents(); // pick up renames made in the UI's teams dialog
+
+  switch (cmd) {
+    case 'server': {
+      const { spawn: spawnServer } = require('child_process');
+      const child = spawnServer(process.execPath, [SERVER_JS], { stdio: 'inherit' });
+      child.on('exit', (code) => process.exit(code || 0));
+      return;
+    }
+    case 'start': return cmdStart();
+    case 'stop': return cmdStop();
+    case 'restart': return cmdRestart();
+    case 'ui': return cmdUi();
+    case 'ls': return cmdLs();
+    case 'ps': return cmdPs();
+    case 'log': return cmdLog(argv[1]);
+    case 'result': return cmdResult(argv[1]);
+    case 'cancel': return cmdCancel(argv[1]);
+    case 'retry': return cmdRetry(argv[1]);
+    case 'waiting': return cmdWaiting();
+    case 'answer': return cmdAnswer(argv[1], argv.slice(2));
+    case 'follow': return cmdFollow(argv.slice(1));
+    case 'status': return cmdStatus();
+    case 'agents': return cmdAgents();
+    case 'help': case '--help': case '-h':
+      console.log(fs.readFileSync(__filename, 'utf8').split('*/')[0].split('/*')[1].trim());
+      return;
+    default: return cmdDispatch(argv);
+  }
+}
+
+main().catch((e) => {
+  console.error(`${BOLD('orch:')} ${e.message}`);
+  process.exit(1);
+});
