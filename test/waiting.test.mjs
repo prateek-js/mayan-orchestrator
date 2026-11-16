@@ -177,6 +177,32 @@ test('retry and followTo rejected on waiting', async () => {
   }
 });
 
+test('long results keep the trailing ASK line (parse before truncation)', async () => {
+  const s = await startServer();
+  try {
+    // 8100 chars of report, then the ASK line — the 8000-char result cap
+    // must not eat the question.
+    const long = 'x'.repeat(8100) + '\nASK: still there? | yes';
+    s.setScenario([[
+      { type: 'result', session_id: SESSION_ID, is_error: false, total_cost_usd: 0.01, duration_ms: 500, result: long },
+    ]]);
+    await fetch(url(s, '/api/tasks'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent: 'tony-stark', task: 'long report then ask' }),
+    });
+    const t = await waitFor(async () => {
+      const st = await s.readState();
+      const task = st.tasks[0];
+      return task && ['waiting', 'done'].includes(task.status) ? task : null;
+    }, { what: 'task to settle' });
+    assert.equal(t.status, 'waiting');
+    assert.equal(t.ask.question, 'still there?');
+    assert.equal(t.result.length, 8000, 'stored result stays capped');
+  } finally {
+    await s.stop();
+  }
+});
+
 test('handoff + ask same message: waiting now, handoff queued only on done', async () => {
   const s = await startServer();
   try {

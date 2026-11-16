@@ -34,7 +34,11 @@ try {
 } catch (e) { /* no scenarios left — emit nothing, exit 0 */ }
 
 const out = events.map(e => JSON.stringify(e)).join('\n') + (events.length ? '\n' : '');
-if (out) process.stdout.write(out);
+// Synchronous write: process.exit() discards pending async stdout writes, so
+// a large result event would be truncated to an unparseable line.
+if (out) {
+  try { fs.writeSync(1, out); } catch (e) { /* reader gone */ }
+}
 if (sleepMs) {
   setTimeout(() => process.exit(0), sleepMs);
 } else {

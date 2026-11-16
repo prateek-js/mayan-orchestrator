@@ -711,6 +711,10 @@ function startTask(task) {
         }
         broadcastSoon();
       } else if (ev.type === 'result') {
+        // Keep the raw final text around for ASK detection — the stored
+        // result is capped at 8000 chars, and the protocol puts the ASK line
+        // at the very end, where truncation would eat it.
+        task.rawResult = typeof ev.result === 'string' ? ev.result : null;
         task.result = typeof ev.result === 'string' ? ev.result.slice(0, 8000) : null;
         task.isError = !!ev.is_error;
         // total_cost_usd is session-cumulative (probe 2026-11-16): assign,
@@ -739,6 +743,7 @@ function startTask(task) {
     running.delete(task.id);
 
     if (cancelling.has(task.id)) {
+      cancelling.delete(task.id);
       task.finishedAt = Date.now();
       task.status = 'cancelled';
       addActivity(task, 'sys', 'cancelled');
@@ -755,8 +760,10 @@ function startTask(task) {
     } else if (code === 0 || code === null) {
       // Clean close: an ASK line in the final result pauses the task instead
       // of finishing it — detection is result-only (never mid-run text), so
-      // an agent quoting the protocol in prose can't trip it.
-      const ask = task.result ? parseAsk(task.result) : null;
+      // an agent quoting the protocol in prose can't trip it. Parsed from the
+      // raw (uncapped) result: the stored cap must not eat a trailing ASK.
+      const ask = task.rawResult ? parseAsk(task.rawResult) : (task.result ? parseAsk(task.result) : null);
+      task.rawResult = undefined;
       if (ask) {
         // Waiting is a pause, not a finish — no finishedAt.
         task.status = 'waiting';
@@ -989,6 +996,7 @@ function writeAnswerContext(task) {
 function answerTask(task, text) {
   if (task.status !== 'waiting') return { error: `cannot answer a ${task.status} task`, code: 409 };
   if (!text || !String(text).trim()) return { error: 'answer text is required', code: 400 };
+  if (String(text).length > 20000) return { error: 'answer text too long (max 20000 chars)', code: 400 };
   if (!getAgent(task.agent)) {
     return { error: `agent "${task.agent}" no longer exists on the board — re-add it in teams, or cancel the task`, code: 400 };
   }

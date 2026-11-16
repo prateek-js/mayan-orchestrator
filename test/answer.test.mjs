@@ -48,7 +48,6 @@ test('answer resumes same session', async () => {
       const task = st.tasks[0];
       return task && task.status === 'done' ? task : null;
     }, { what: 'answer leg to finish' });
-    assert.ok(['queued', 'running', 'done'].includes(t.status) === false || true);
     assert.equal(t.result, 'final answer done');
     assert.equal(t.costUsd, 0.08, 'cost assigned (cumulative), not summed');
     assert.equal(t.durationMs, 3000, 'duration summed across legs');
@@ -66,12 +65,14 @@ test('answer resumes same session', async () => {
     const lines = tasksMd.split('\n').filter(l => l.startsWith('- [board]'));
     assert.equal(lines.length, 1, 'one ledger line total');
   } finally {
+    cleanup();
     await s.stop();
   }
 });
 
 test('answer falls back to fresh leg when transcript gone', async () => {
   const s = await startServer({ seed: waitingSeed({ cwd: '/tmp/ans-fresh' }) });
+  const cleanup = () => {}; // no transcript planted
   try {
     // No plantTranscript — the transcript file does not exist.
     s.setScenario([[
@@ -99,12 +100,14 @@ test('answer falls back to fresh leg when transcript gone', async () => {
     const promptIdx = args[0].args.indexOf('-p');
     assert.ok(args[0].args[promptIdx + 1].includes('Read ' + ctxFile));
   } finally {
+    cleanup();
     await s.stop();
   }
 });
 
 test('answer validation', async () => {
   const s = await startServer({ seed: waitingSeed({ status: 'done', ask: null }) });
+  const cleanup = () => {}; // no transcript planted
   try {
     const r = await fetch(url(s, `/api/tasks/${TASK_ID}/answer`), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -118,12 +121,14 @@ test('answer validation', async () => {
     });
     assert.equal(r404.status, 404);
   } finally {
+    cleanup();
     await s.stop();
   }
 });
 
 test('empty answer rejected, task stays waiting', async () => {
   const s = await startServer({ seed: waitingSeed() });
+  const cleanup = () => {}; // no transcript planted
   try {
     const r = await fetch(url(s, `/api/tasks/${TASK_ID}/answer`), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -133,12 +138,14 @@ test('empty answer rejected, task stays waiting', async () => {
     const st = await s.readState();
     assert.equal(st.tasks[0].status, 'waiting');
   } finally {
+    cleanup();
     await s.stop();
   }
 });
 
 test('answer after agent renamed → 400 naming the agent', async () => {
   const s = await startServer({ seed: waitingSeed() });
+  const cleanup = () => {}; // no transcript planted
   try {
     // A definition file in the sandbox agents dir, so the rename has a file
     // to move — and so the test proves renames stay inside the sandbox
@@ -164,14 +171,15 @@ test('answer after agent renamed → 400 naming the agent', async () => {
     assert.equal(st.tasks[0].status, 'waiting');
     assert.equal(s.argsLog().length, 0, 'nothing spawned');
   } finally {
+    cleanup();
     await s.stop();
   }
 });
 
 test('double answer: first wins, second 409, one invocation', async () => {
   const s = await startServer({ seed: waitingSeed({ cwd: '/tmp/ans-double' }) });
+  const cleanup = plantTranscript(SESSION_ID, '/tmp/ans-double');
   try {
-    const cleanup = plantTranscript(SESSION_ID, '/tmp/ans-double');
     s.setScenario([[
       { type: 'result', session_id: SESSION_ID, is_error: false, total_cost_usd: 0.08, duration_ms: 2000, result: 'once only' },
     ]]);
@@ -193,6 +201,7 @@ test('double answer: first wins, second 409, one invocation', async () => {
     }, { what: 'leg to finish' });
     assert.equal(s.argsLog().length, 1, 'fake claude ran once');
   } finally {
+    cleanup();
     await s.stop();
   }
 });
@@ -202,8 +211,8 @@ test('slots respected: answered task queues while slots busy', async () => {
     seed: waitingSeed({ cwd: '/tmp/ans-slots' }),
     env: { ORCH_CONCURRENCY: '3' },
   });
+  const cleanup = plantTranscript(SESSION_ID, '/tmp/ans-slots');
   try {
-    const cleanup = plantTranscript(SESSION_ID, '/tmp/ans-slots');
     // Three long-running legs occupy all slots; the answer leg runs after.
     s.setScenario([
       [{ __sleep_ms: 20000 }],
@@ -238,14 +247,15 @@ test('slots respected: answered task queues while slots busy', async () => {
     const st2 = await s.readState();
     assert.equal(st2.tasks.find(t => t.id === TASK_ID).status, 'queued', 'still queued — no slot');
   } finally {
+    cleanup();
     await s.stop();
   }
 });
 
 test('DISPATCH after answer still resolves', async () => {
   const s = await startServer({ seed: waitingSeed({ cwd: '/tmp/ans-dispatch' }) });
+  const cleanup = plantTranscript(SESSION_ID, '/tmp/ans-dispatch');
   try {
-    const cleanup = plantTranscript(SESSION_ID, '/tmp/ans-dispatch');
     // Leg 1 (already consumed pre-seed; the waiting state came from it) —
     // its assistant text carried a DISPATCH. Simulate that the registered
     // handoff survived on the task, as scanForHandoff would have left it.
@@ -274,6 +284,7 @@ test('DISPATCH after answer still resolves', async () => {
     assert.equal(vision.parentId, TASK_ID);
     assert.equal(vision.followTo, TASK_ID);
   } finally {
+    cleanup();
     await s.stop();
   }
 });

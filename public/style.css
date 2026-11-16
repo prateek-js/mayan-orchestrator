@@ -402,6 +402,8 @@ td.t-act button:hover { color: var(--text); border-color: var(--dim); }
 .drawer-qa .txt { color: var(--text); min-width: 0; word-break: break-word; white-space: pre-wrap; }
 .drawer-answer { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
 .drawer-answer textarea { min-height: 64px; }
+.drawer-answer-msg { min-height: 15px; font-size: 11px; color: var(--bad); }
+.drawer-answer-msg:empty { min-height: 0; }
 .drawer-result {
   background: var(--ink); border: 1px solid var(--line-soft); border-radius: 3px;
   padding: 10px 12px; font-size: 12px; white-space: pre-wrap; word-break: break-word;

@@ -6,11 +6,11 @@
  *   orch "task text" [--agent tony-stark|dr-strange|vision|hawkeye|spiderman]
  *        [--repo ~/Coding/Self/project] [--model <model>] [--no-auto]
  *        [--priority] [--wait]
- *   orch ls                      queued + running tasks
+ *   orch ls                      queued + running + waiting tasks
  *   orch ps                      running tasks with latest activity
  *   orch log [n]                 last n finished tasks (default 10)
  *   orch result <id>             full result of one task
- *   orch cancel <id>             cancel a queued/running task
+ *   orch cancel <id>             cancel a queued/running/waiting task
  *   orch retry <id>              requeue a failed/cancelled task
  *   orch waiting                 tasks paused on a question for Prateek
  *   orch answer <id> "text"      answer a waiting task — resumes its session
@@ -284,7 +284,7 @@ async function cmdAnswer(id, textParts) {
 async function cmdLog(nArg) {
   const n = parseInt(nArg || '10', 10) || 10;
   const s = await request('GET', '/api/state');
-  const fin = s.tasks.filter(t => !['queued', 'running'].includes(t.status))
+  const fin = s.tasks.filter(t => ['done', 'failed', 'cancelled'].includes(t.status))
     .sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0))
     .slice(0, n);
   if (!fin.length) { console.log(DIM('nothing finished yet')); return; }
@@ -389,12 +389,13 @@ async function cmdStatus() {
     const s = await request('GET', '/api/state');
     const running = s.tasks.filter(t => t.status === 'running').length;
     const queued = s.tasks.filter(t => t.status === 'queued').length;
-    const fin = s.tasks.filter(t => !['queued', 'running'].includes(t.status));
+    const waiting = s.tasks.filter(t => t.status === 'waiting').length;
+    const fin = s.tasks.filter(t => ['done', 'failed', 'cancelled'].includes(t.status));
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const todayFin = fin.filter(t => (t.finishedAt || 0) >= today.getTime());
     const cost = todayFin.reduce((sum, t) => sum + (t.costUsd || 0), 0);
     console.log(`orchestrator ${DIM(`pid ${h.pid} · up ${fmtDur(h.uptime * 1000)} · ${BASE}`)}`);
-    console.log(`running ${BOLD(String(running))}${DIM(`/${s.concurrency}`)} · queued ${BOLD(String(queued))} · finished ${fin.length} (${todayFin.length} today, $${cost.toFixed(2)})`);
+    console.log(`running ${BOLD(String(running))}${DIM(`/${s.concurrency}`)} · queued ${BOLD(String(queued))}${waiting ? DIM(` · ${waiting} waiting`) : ''} · finished ${fin.length} (${todayFin.length} today, $${cost.toFixed(2)})`);
   } catch (e) {
     console.error(e.message);
     process.exit(1);

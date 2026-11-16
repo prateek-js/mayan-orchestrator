@@ -135,8 +135,13 @@ function waitingTasks() {
 function answerTask(t, text) {
   api('POST', `/api/tasks/${t.id}/answer`, { text })
     .catch(e => {
-      const head = $('#waiting-strip .strip-head');
-      if (head) head.textContent = `answer failed: ${e.message}`;
+      // Stash the error so re-renders keep it visible — a rebuild every
+      // second would otherwise flash it away before anyone reads it.
+      const strip = $('#waiting-strip');
+      if (strip) {
+        strip.dataset.error = `answer failed: ${e.message}`;
+        renderWaiting();
+      }
     });
 }
 
@@ -144,6 +149,12 @@ function renderWaiting() {
   const strip = $('#waiting-strip');
   const list = waitingTasks();
   strip.hidden = list.length === 0;
+  if (list.length && strip.dataset.error && strip.childElementCount) {
+    // Keep showing a stashed answer error instead of rebuilding over it.
+    const head = strip.querySelector('.strip-head');
+    if (head) { head.querySelector('.strip-hint').textContent = strip.dataset.error; return; }
+  }
+  strip.dataset.error = '';
   strip.innerHTML = '';
   if (!list.length) return;
 
@@ -483,15 +494,29 @@ function renderDrawer() {
     answerWrap.hidden = t.status !== 'waiting';
     if (t.status === 'waiting') {
       const ta = $('#drawer-answer');
-      ta.value = '';
+      // Reset only when the target task or its live question changed — the
+      // drawer re-renders on every SSE broadcast, and clearing unconditionally
+      // would wipe a half-typed answer whenever anything else streams.
+      const target = t.id + ':' + (t.ask?.question || '');
+      if (ta.dataset.forTarget !== target) {
+        ta.value = '';
+        ta.dataset.forTarget = target;
+      }
       const send = $('#drawer-answer-send');
+      // Errors render next to the form (drawerMsg), not console-only: a 409
+      // race or a removed agent must be visible where the user is typing.
+      const drawerMsg = $('#drawer-answer-msg');
+      if (drawerMsg && drawerMsg.dataset.fresh !== '1') drawerMsg.textContent = '';
       send.onclick = () => {
         const text = ta.value.trim();
         if (!text) return;
         send.disabled = true;
         api('POST', `/api/tasks/${t.id}/answer`, { text })
-          .then(() => { ta.value = ''; })
-          .catch(e => { ta.value = text; $('#form-msg')?.replaceChildren(); console.error(e.message); })
+          .then(() => { ta.value = ''; ta.dataset.forTarget = ''; if (drawerMsg) drawerMsg.textContent = ''; })
+          .catch(e => {
+            ta.value = text;
+            if (drawerMsg) { drawerMsg.textContent = e.message; drawerMsg.dataset.fresh = '1'; }
+          })
           .finally(() => { send.disabled = false; });
       };
     }
