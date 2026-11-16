@@ -62,8 +62,13 @@ orch result t-1a2b3c4d         # full result of one task
 orch cancel t-1a2b3c4d
 orch retry t-1a2b3c4d          # requeue failed/cancelled (resumes the session if it can)
 orch follow t-1a2b3c4d "now add a settings entry for it" [--agent a] [--wait]
+orch waiting                   # tasks paused on a question for you
+orch answer t-1a2b3c4d "use redis"   # answer — resumes the session
 orch agents                    # the board's live agent roster
 ```
+
+The CLI's source of truth is `bin/orch` in this repo — after changing it,
+`cp bin/orch ~/.local/bin/orch` deploys.
 
 ## Follow-ups, handoffs, sessions
 
@@ -79,6 +84,30 @@ orch agents                    # the board's live agent roster
   task that *resumes the parent's session*, linked via `↳ parentId` on the
   card. The live roster is injected into every prompt, so renamed agents never
   produce dropped handoffs.
+
+### Decisions — the ASK protocol
+
+When an agent hits a decision Prateek should make, it doesn't guess and
+doesn't end the task. It ends its turn with a final line:
+
+```
+ASK: <question> | <option A> | <option B>
+```
+
+(options optional, up to 4). The task flips to **waiting**: it holds no
+concurrency slot, no process, and never auto-expires — cancel it to abandon.
+Waiting cards live in a strip above the lanes; click an option chip to answer
+in one click, `other…` (or the card's drawer) for free text, or from the
+terminal: `orch waiting` then `orch answer <id> "text"`.
+
+Answering requeues the task at priority and **resumes the same claude
+session** — same card, same ledger line, full conversational memory. Ask/
+answer rounds chain: each round is recorded in the card's drawer (and in the
+context file if the session transcript is ever lost). Ledger cost is the
+session-cumulative total (a resumed leg reports the whole session's spend);
+duration is the sum of the legs' runtimes. `--wait` on a dispatch blocks
+through a waiting phase (it does not answer for you).
+
 - **Card extras** — finished cards show a git snapshot (branch, dirty-file
   count, latest commit) and links to artifacts the agent wrote
   (plans/decisions/demos under `~/.claude/orchestrator/`).
@@ -103,7 +132,7 @@ workflow:
   the repo directory, streaming `--output-format stream-json` events; the board
   shows them live over SSE. The stream's `session_id` is captured on the task
   (even for killed runs) and used for resume.
-- Concurrency 3 (env `ORCH_CONCURRENCY`), 45-min hard timeout
+- Concurrency 3 (env `ORCH_CONCURRENCY` — waiting tasks hold no slot), 45-min hard timeout
   (env `ORCH_TIMEOUT_MIN`) **plus an 8-min idle timeout** (env
   `ORCH_IDLE_TIMEOUT_MIN`) — a task that is still streaming is never killed
   mid-run; only silence triggers the kill.
