@@ -19,6 +19,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
+const { parseAsk } = require('./ask');
 
 const PORT = parseInt(process.env.ORCH_PORT || '7171', 10);
 const HOST = '127.0.0.1';
@@ -123,6 +124,8 @@ function getAgent(name) {
 
 // A task that is queued or running pins its agent in place: the runner needs
 // the exact name for `claude --agent`, and lanes are keyed by agent name.
+// `waiting` intentionally does NOT count — a forgotten question must never
+// lock rename/remove forever (the answer leg re-resolves the agent instead).
 function agentBusy(name) {
   return state.tasks.some(t => t.agent === name && ['queued', 'running'].includes(t.status));
 }
@@ -325,7 +328,7 @@ function pruneOldTasks() {
   const cutoff = Date.now() - KEEP_MS;
   const before = state.tasks.length;
   state.tasks = state.tasks.filter(t =>
-    ['queued', 'running'].includes(t.status) || (t.finishedAt || t.createdAt || 0) >= cutoff);
+    ['queued', 'running', 'waiting'].includes(t.status) || (t.finishedAt || t.createdAt || 0) >= cutoff);
   const removed = before - state.tasks.length;
   if (removed) log(`pruned ${removed} finished task(s) older than ${KEEP_DAYS} days`);
   return removed;
@@ -558,6 +561,10 @@ function startTask(task) {
   task.result = null;
   task.error = null;
   task.git = null;
+  // Per-leg resets: a stale isError from a previous leg would mislabel this
+  // leg's close; a resumed leg clears the live question it is answering.
+  task.isError = false;
+  task.ask = null;
 
   const claude = findClaude();
   if (!claude) { failNow(task, 'claude CLI not found in PATH'); return; }
@@ -695,22 +702,39 @@ function startTask(task) {
   child.on('close', async (code, signal) => {
     clearTimeout(timers.hard); clearTimeout(timers.idle);
     running.delete(task.id);
-    task.finishedAt = Date.now();
 
     if (cancelling.has(task.id)) {
-      cancelling.delete(task.id);
+      task.finishedAt = Date.now();
       task.status = 'cancelled';
       addActivity(task, 'sys', 'cancelled');
     } else if (idleKilled) {
+      task.finishedAt = Date.now();
       task.status = 'failed';
     } else if (task.error && task.error.startsWith('timed out')) {
+      task.finishedAt = Date.now();
       task.status = 'failed';
     } else if (task.isError) {
+      task.finishedAt = Date.now();
       task.status = 'failed';
       if (!task.error) task.error = task.result || `agent reported an error (exit ${code})`;
     } else if (code === 0 || code === null) {
-      task.status = 'done';
+      // Clean close: an ASK line in the final result pauses the task instead
+      // of finishing it — detection is result-only (never mid-run text), so
+      // an agent quoting the protocol in prose can't trip it.
+      const ask = task.result ? parseAsk(task.result) : null;
+      if (ask) {
+        // Waiting is a pause, not a finish — no finishedAt.
+        task.status = 'waiting';
+        task.ask = { question: ask.question, options: ask.options, askedAt: Date.now() };
+        task.qa = task.qa || [];
+        addActivity(task, 'sys', 'waiting for Prateek: ' + ask.question);
+        log(`waiting ${task.id}: ${ask.question}`);
+      } else {
+        task.finishedAt = Date.now();
+        task.status = 'done';
+      }
     } else {
+      task.finishedAt = Date.now();
       task.status = 'failed';
       if (!task.error) task.error = `exited with code ${code}${signal ? ` (${signal})` : ''}`;
     }
@@ -719,8 +743,13 @@ function startTask(task) {
     if (task.status === 'done' && cwd) await attachGitSnapshot(task, cwd);
     if (task.status === 'done') findArtifacts(task, task.startedAt);
     log(`finished ${task.id} status=${task.status} cost=${task.costUsd || 0}${task.git ? ' git=' + task.git : ''}`);
-    saveState(); broadcastSoon(); appendTasksMd(task);
-    if (task.status === 'done') queueHandoffs(task);
+    saveState(); broadcastSoon();
+    // The ledger line and handoff queueing belong to terminal `done` only —
+    // a waiting task has not finished its work yet.
+    if (task.status === 'done') {
+      appendTasksMd(task);
+      queueHandoffs(task);
+    }
     dispatchLoop();
   });
 
@@ -820,7 +849,8 @@ function queueHandoffs(task) {
 }
 
 function cancelTask(task) {
-  if (task.status === 'queued') {
+  // Waiting holds no process — cancel directly, exactly like queued.
+  if (task.status === 'queued' || task.status === 'waiting') {
     task.status = 'cancelled';
     task.finishedAt = Date.now();
     saveState(); broadcast(); appendTasksMd(task);
@@ -859,6 +889,7 @@ function queueTask(spec) {
     parentId: spec.parentId || null,
     followTo: spec.followTo || null,
     retryOf: spec.retryOf || null,
+    ask: null, qa: [],
     contextFile: null,
     sessionId: null, resumeSessionId: null,
     git: null, priority: spec.priority ? 1 : 0,
@@ -1108,6 +1139,12 @@ const server = http.createServer(async (req, res) => {
       if (!ag) { sendJSON(res, 400, { error: `unknown agent "${agent}" — use one of: ${config.agents.map(a => a.name).join(', ')}` }); return; }
       if (!text) { sendJSON(res, 400, { error: 'task text is required' }); return; }
       if (text.length > 20000) { sendJSON(res, 400, { error: 'task text too long (max 20000 chars)' }); return; }
+      // A waiting task's session must not get a second writer — answer it
+      // instead of following up.
+      if (body.followTo && getTask(body.followTo)?.status === 'waiting') {
+        sendJSON(res, 409, { error: `${body.followTo} is waiting for an answer — answer it instead of following up` });
+        return;
+      }
       const model = String(body.model || ag.defModel).trim() || ag.defModel;
       const task = queueTask({
         agent,
@@ -1139,7 +1176,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'DELETE' && p === '/api/tasks/finished') {
       const before = state.tasks.length;
-      state.tasks = state.tasks.filter(t => ['queued', 'running'].includes(t.status));
+      state.tasks = state.tasks.filter(t => ['queued', 'running', 'waiting'].includes(t.status));
       const removed = before - state.tasks.length;
       saveState(); broadcast();
       log(`cleared ${removed} finished tasks`);

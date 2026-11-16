@@ -81,7 +81,7 @@ test('harness smoke: dispatch → fake claude → result captured', async () => 
       const task = st.tasks.find(x => x.agent === 'tony-stark');
       return task && ['done', 'failed', 'cancelled', 'waiting'].includes(task.status) ? task : null;
     }, { what: 'task to finish' });
-    assert.equal(t.status, 'done'); // waiting arrives in Task 2
+    assert.equal(t.status, 'waiting'); // Task 2 shipped the conversion
     assert.equal(t.result, 'thinking\nASK: red or blue? | red | blue');
     assert.equal(t.sessionId, 'sess-test-0001');
   } finally {

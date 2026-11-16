@@ -17,6 +17,8 @@ import { fileURLToPath } from 'url';
 const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const FAKE_CLAUDE_SRC = path.join(REPO, 'test', 'fake-claude.mjs');
 const SESSION_ID = 'sess-test-0001';
+// Task ids must match the server's route regex (t-<hex>), so seeds use hex too.
+const TASK_ID = 't-7e57fed1';
 
 let portCounter = 7500 + Math.floor(Math.random() * 400);
 
@@ -33,7 +35,7 @@ function healthOk(port) {
   });
 }
 
-export async function startServer() {
+export async function startServer({ reuse = null, seed = null } = {}) {
   // Guard: never test the live board by accident. ORCH_TEST_ALLOW_7171=1
   // opts out for machines where the real board always runs — the guard's
   // point is catching *accidental* 7171 contact, not forbidding coexistence.
@@ -41,7 +43,9 @@ export async function startServer() {
     throw new Error('refusing to run tests against the live board on 7171 — helpers always isolate');
   }
 
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-test-'));
+  // reuse: a previous session object — restart on the SAME tmpDir/state
+  // (orchestrator boots and crashes; state.json must survive).
+  const tmpDir = reuse ? reuse.tmpDir : fs.mkdtempSync(path.join(os.tmpdir(), 'orch-test-'));
   const orchDir = path.join(tmpDir, 'orch');
   const binDir = path.join(tmpDir, 'bin');
   fs.mkdirSync(orchDir, { recursive: true });
@@ -51,12 +55,14 @@ export async function startServer() {
   fs.copyFileSync(path.join(REPO, 'server.js'), path.join(tmpDir, 'server.js'));
   fs.copyFileSync(path.join(REPO, 'ask.js'), path.join(tmpDir, 'ask.js'));
   fs.cpSync(path.join(REPO, 'public'), path.join(tmpDir, 'public'), { recursive: true });
-  fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify({
-    boardName: 'test-board',
-    agents: ['tony-stark', 'dr-strange', 'vision', 'hawkeye', 'spiderman'].map((name, i) => ({
-      name, color: ['--dev', '--plan', '--arch', '--qa', '--doc'][i], defModel: 'test-model',
-    })),
-  }, null, 1));
+  if (!reuse) {
+    fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify({
+      boardName: 'test-board',
+      agents: ['tony-stark', 'dr-strange', 'vision', 'hawkeye', 'spiderman'].map((name, i) => ({
+        name, color: ['--dev', '--plan', '--arch', '--qa', '--doc'][i], defModel: 'test-model',
+      })),
+    }, null, 1));
+  }
 
   // Install the fake claude.
   const fakeBin = path.join(binDir, 'claude');
@@ -64,9 +70,16 @@ export async function startServer() {
   fs.chmodSync(fakeBin, 0o755);
 
   const argsLogFile = path.join(tmpDir, 'fake-claude-args.log');
-  fs.writeFileSync(argsLogFile, '');
+  if (!reuse) fs.writeFileSync(argsLogFile, '');
   const scenFile = path.join(tmpDir, 'fake-claude-scenarios.json');
-  fs.writeFileSync(scenFile, '[]');
+  if (!reuse) fs.writeFileSync(scenFile, '[]');
+
+  // Seed state.json AFTER any previous server is stopped and BEFORE this one
+  // boots — a running server's flushState() on SIGTERM would clobber a
+  // pre-existing file with its own in-memory (empty) state.
+  if (seed) {
+    seedTask(path.join(tmpDir, 'state.json'), seed);
+  }
 
   const port = freePort();
   const child = spawn(process.execPath, [path.join(tmpDir, 'server.js')], {
@@ -120,7 +133,7 @@ export async function startServer() {
 // One task shaped exactly like queueTask() produces. Merge overrides.
 export function seedTask(stateFile, overrides = {}) {
   const t = {
-    id: 't-test0001',
+    id: TASK_ID,
     agent: 'tony-stark',
     repo: '',
     task: 'test task text',
@@ -165,7 +178,7 @@ export function plantTranscript(sessionId, cwd) {
   return () => { try { fs.unlinkSync(file); } catch { /* gone */ } };
 }
 
-export { SESSION_ID };
+export { SESSION_ID, TASK_ID };
 
 // Poll until fn() returns truthy (or timeout) and return its value.
 export async function waitFor(fn, { timeout = 8000, step = 150, what = 'condition' } = {}) {
