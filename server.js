@@ -37,7 +37,7 @@ const CONFIG_FILE = path.join(DIR, 'config.json');
 const PID_FILE = path.join(DIR, 'server.pid');
 const LOG_FILE = path.join(DIR, 'server.log');
 const PUBLIC_DIR = path.join(DIR, 'public');
-const ORCH_DIR = path.join(os.homedir(), '.claude', 'orchestrator');
+const ORCH_DIR = process.env.ORCH_DIR || path.join(os.homedir(), '.claude', 'orchestrator');
 // Continuity with the setup from 2026-11-02: the markdown log stays the single log.
 const TASKS_MD = path.join(ORCH_DIR, 'tasks.md');
 // Lossless per-task context: parent task + full results, referenced from the
