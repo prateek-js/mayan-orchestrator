@@ -1,0 +1,610 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comet — elliptical orbit demo</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='12' cy='4' r='2.5' fill='%23fab219'/%3E%3Ccircle cx='4' cy='12' r='1.8' fill='%23ffffff'/%3E%3C/svg%3E">
+<style>
+  /* ---------- tokens (validated dark palette) ---------- */
+  :root {
+    color-scheme: dark;
+    --page:           #0d0d0d;
+    --surface-1:      #1a1a19;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --axis:           #383835;
+    --border:         rgba(255,255,255,0.10);
+    --series-1:       #3987e5;   /* ion tail  (categorical slot 1, dark) */
+    --series-2:       #d95926;   /* dust tail (categorical slot 2, dark) */
+  }
+
+  /* ---------- chrome ---------- */
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); }
+  .viz-root {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--text-primary);
+    background: var(--page);
+    padding: 24px clamp(16px, 4vw, 48px) 64px;
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 22px; font-weight: 650; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .subtitle { color: var(--text-secondary); font-size: 13.5px; margin: 0 0 20px; max-width: 72ch; }
+  h2 { font-size: 15px; font-weight: 620; margin: 0 0 2px; }
+  .panel-sub { color: var(--text-secondary); font-size: 12.5px; margin: 0 0 12px; max-width: 78ch; }
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px 20px;
+    margin-bottom: 20px;
+  }
+  :focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; border-radius: 4px; }
+
+  /* ---------- filter row (one row, above everything it scopes) ---------- */
+  .filters {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 14px 22px;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 16px; margin-bottom: 20px;
+  }
+  .filters label { font-size: 12.5px; color: var(--text-secondary); display: flex; align-items: center; gap: 8px; }
+  .filters output { font-size: 12.5px; color: var(--text-primary); font-variant-numeric: tabular-nums; min-width: 64px; }
+  input[type="range"] { accent-color: var(--series-1); width: 150px; }
+  .spacer { flex: 1; }
+  .btn {
+    font: inherit; font-size: 12.5px; color: var(--text-primary); min-width: 76px;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 7px;
+    padding: 6px 12px; cursor: pointer;
+  }
+  .btn:hover { border-color: var(--axis); }
+
+  /* ---------- orbit card ---------- */
+  .card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+  .legend { display: flex; gap: 18px; }
+  .legend .key { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-secondary); }
+  .legend .key i { width: 16px; height: 0; border-top: 2px solid; border-radius: 1px; }
+  .legend .key.ion  i { border-color: var(--series-1); }
+  .legend .key.dust i { border-color: var(--series-2); }
+  .canvas-wrap { position: relative; }
+  #orbit { display: block; width: 100%; height: auto; border-radius: 6px; cursor: crosshair; }
+
+  /* ---------- tooltip ---------- */
+  .tip {
+    position: absolute; pointer-events: none; z-index: 2;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 11px; font-size: 12px; min-width: 128px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.45);
+    opacity: 0; transition: opacity 120ms ease;
+  }
+  .tip.show { opacity: 1; }
+  .tip .row { display: flex; align-items: center; gap: 8px; padding: 1.5px 0; }
+  .tip .row i { width: 12px; height: 0; border-top: 2px solid; border-radius: 1px; flex: none; }
+  .tip .row i.ion  { border-color: var(--series-1); }
+  .tip .row i.dust { border-color: var(--series-2); }
+  .tip .row i.sun  { border-color: var(--axis); }
+  .tip b { color: var(--text-primary); font-weight: 620; margin-left: auto; padding-left: 12px; }
+  .tip span { color: var(--text-secondary); }
+
+  /* ---------- stat tiles ---------- */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 20px; }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .tile .label { font-size: 12.5px; color: var(--text-secondary); }
+  .tile .value { font-size: 26px; font-weight: 620; margin-top: 3px; min-width: 108px; }
+  .tile .value small { font-size: 14px; font-weight: 500; color: var(--text-secondary); margin-left: 2px; }
+  .tile .sub { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; }
+
+  /* ---------- table view ---------- */
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  caption { text-align: left; color: var(--text-muted); font-size: 11.5px; padding-bottom: 8px; }
+  th { color: var(--text-muted); font-weight: 600; text-align: right; padding: 5px 10px; border-bottom: 1px solid var(--axis); }
+  th:first-child, td:first-child { text-align: left; }
+  td { color: var(--text-secondary); text-align: right; padding: 5px 10px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+  tbody tr:hover { background: rgba(255,255,255,0.03); }
+  th:first-child { padding-left: 0; }
+  td:first-child { padding-left: 0; }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <h1>Comet</h1>
+  <p class="subtitle">
+    A comet on an elliptical orbit around the Sun. The ion tail (blue) points
+    straight away from the Sun, pushed by the solar wind; the dust tail (orange)
+    curves along the orbit because dust grains keep some of the comet's orbital
+    motion. Both tails grow as the comet nears perihelion &mdash; activity scales
+    roughly with 1/r&sup2;.
+  </p>
+
+  <div class="filters" role="group" aria-label="Simulation controls">
+    <label for="ecc">Eccentricity
+      <input type="range" id="ecc" min="0.05" max="0.90" step="0.01" value="0.70">
+      <output id="ecc-out" for="ecc">0.70</output>
+    </label>
+    <label for="speed">Speed
+      <input type="range" id="speed" min="5" max="120" step="1" value="45">
+      <output id="speed-out" for="speed">45 d/s</output>
+    </label>
+    <div class="spacer"></div>
+    <button class="btn" id="pause" aria-pressed="false">Pause</button>
+    <button class="btn" id="reset">Reset</button>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Orbit</h2>
+      <div class="legend" aria-hidden="false">
+        <span class="key ion"><i></i>Ion tail</span>
+        <span class="key dust"><i></i>Dust tail</span>
+      </div>
+    </div>
+    <div class="canvas-wrap">
+      <canvas id="orbit" tabindex="0" role="img"
+        aria-label="Animated view: a comet orbits the Sun on an ellipse. The blue ion tail points away from the Sun; the orange dust tail curves behind. Current values are shown in the tiles below and the observation log.">
+      </canvas>
+      <div class="tip" id="tip" role="presentation"></div>
+    </div>
+  </div>
+
+  <div class="tiles">
+    <div class="tile">
+      <div class="label">Distance from Sun</div>
+      <div class="value"><span id="t-r">&ndash;</span><small>AU</small></div>
+      <div class="sub" id="t-r-sub">q &ndash; AU &middot; Q &ndash; AU</div>
+    </div>
+    <div class="tile">
+      <div class="label">Orbital velocity</div>
+      <div class="value"><span id="t-v">&ndash;</span><small>km/s</small></div>
+      <div class="sub" id="t-v-sub">period &ndash; yr</div>
+    </div>
+    <div class="tile">
+      <div class="label">Ion tail length</div>
+      <div class="value"><span id="t-li">&ndash;</span><small>AU</small></div>
+      <div class="sub">anti-sunward &middot; solar wind</div>
+    </div>
+    <div class="tile">
+      <div class="label">Dust tail length</div>
+      <div class="value"><span id="t-ld">&ndash;</span><small>AU</small></div>
+      <div class="sub">curved &middot; dust lags the nucleus</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <table>
+      <caption>Observation log &mdash; sampled every 15 simulated days (accessible data source for the animation)</caption>
+      <thead>
+        <tr><th scope="col">t (days)</th><th scope="col">r (AU)</th><th scope="col">v (km/s)</th><th scope="col">ion (AU)</th><th scope="col">dust (AU)</th></tr>
+      </thead>
+      <tbody id="log-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  /* ---------- constants ---------- */
+  const GM      = 4 * Math.PI * Math.PI;   // GM_sun in AU^3/yr^2
+  const AU_KMS  = 4.74057;                 // 1 AU/yr in km/s
+  const A       = 2.0;                     // semi-major axis, AU (fixed)
+  const TAIL_CAP = 0.9;                    // max ion tail length, AU
+  const SAMPLE_DAYS = 15;                  // observation-log interval
+
+  /* ---------- elements ---------- */
+  const canvas = document.getElementById('orbit');
+  const ctx    = canvas.getContext('2d');
+  const wrap   = canvas.parentElement;
+  const tip    = document.getElementById('tip');
+  const eccIn  = document.getElementById('ecc');
+  const spdIn  = document.getElementById('speed');
+  const pauseB = document.getElementById('pause');
+  const resetB = document.getElementById('reset');
+  const els = {
+    r:  document.getElementById('t-r'),   v:  document.getElementById('t-v'),
+    li: document.getElementById('t-li'),  ld: document.getElementById('t-ld'),
+    rSub: document.getElementById('t-r-sub'), vSub: document.getElementById('t-v-sub'),
+    log: document.getElementById('log-body'),
+    eccOut: document.getElementById('ecc-out'), spdOut: document.getElementById('speed-out'),
+  };
+
+  /* ---------- state ---------- */
+  let e = parseFloat(eccIn.value);
+  let speed = parseFloat(spdIn.value);
+  let paused = false;
+  let M = 0;                // mean anomaly, rad; t = 0 is perihelion
+  let tDays = 0;            // simulated days since reset
+  let nextSample = 0;
+  let cssW = 900, cssH = 520, dpr = 1;
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  if (reducedMotion.matches) setPaused(true);
+
+  /* ---------- derived orbit quantities ---------- */
+  const bOf   = () => A * Math.sqrt(1 - e * e);
+  const qOf   = () => A * (1 - e);           // perihelion
+  const QOf   = () => A * (1 + e);           // aphelion
+  const perYr = () => Math.pow(A, 1.5);      // Kepler III, years
+
+  /* Kepler's equation M = E - e*sin(E), Newton-Raphson */
+  function eccentricAnomaly(Ma) {
+    let En = Ma + e * Math.sin(Ma);
+    for (let i = 0; i < 7; i++) {
+      const d = (En - e * Math.sin(En) - Ma) / (1 - e * Math.cos(En));
+      En -= d;
+      if (Math.abs(d) < 1e-9) break;
+    }
+    return En;
+  }
+
+  /* state of the comet: position rel. to Sun (AU), r, speed, motion unit */
+  function cometState() {
+    const E = eccentricAnomaly(M);
+    const x = A * (Math.cos(E) - e);
+    const y = bOf() * Math.sin(E);
+    const r = A * (1 - e * Math.cos(E));
+    const v = Math.sqrt(GM * (2 / r - 1 / A)) * AU_KMS;   // vis-viva
+    // prograde velocity direction = d(x,y)/dE normalised (E always increases)
+    let mx = -A * Math.sin(E), my = bOf() * Math.cos(E);
+    const mm = Math.hypot(mx, my) || 1;
+    mx /= mm; my /= mm;
+    return { x, y, r, v, mx, my };
+  }
+
+  /* tail lengths in AU (activity ~ 1/r^2) */
+  function tailLengths(r) {
+    const act = 1 / (r * r);
+    const li = TAIL_CAP * Math.min(1, 1.1 * act);
+    const ld = 0.72 * li;
+    return { li, ld };
+  }
+
+  /* ---------- layout / fit ---------- */
+  /* horizontal: sun->aphelion on the left, perihelion + max tail on the right;
+     vertical: the ellipse's semi-minor axis */
+  function fitScale() {
+    const kH = (cssW / 2 - 30) / Math.max(QOf(), qOf() + TAIL_CAP + 0.1);
+    const kV = (cssH / 2 - 30) / (bOf() + 0.2);
+    return Math.min(kH, kV);
+  }
+
+  function resize() {
+    const rect = wrap.getBoundingClientRect();
+    cssW = Math.max(320, Math.round(rect.width));
+    cssH = Math.max(300, Math.round(Math.min(560, cssW * 0.56)));
+    dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    canvas.style.height = cssH + 'px';
+  }
+  new ResizeObserver(resize).observe(wrap);
+  resize();
+
+  /* ---------- rendering ---------- */
+  function render() {
+    const s = cometState();
+    const { li, ld } = tailLengths(s.r);
+    const k = fitScale();
+    const cx = cssW / 2, cy = cssH / 2;         // Sun at centre (a focus)
+    const px = cx + s.x * k, py = cy - s.y * k; // canvas y is flipped
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    drawRings(cx, cy, k);
+    drawOrbit(cx, cy, k);
+    if (hovering) drawRadius(cx, cy, px, py);
+    const dd = dustDir(s, cx, cy, px, py);
+    drawDustTail(px, py, s, dd, ld, k);
+    drawIonTail(px, py, cx, cy, li, k);
+    drawSun(cx, cy);
+    drawComet(px, py);
+    drawTailLabels(px, py, cx, cy, s, dd, li, ld, k);
+    return { s, li, ld };
+  }
+
+  function drawRings(cx, cy, k) {
+    const maxRing = Math.min(3, Math.floor(Math.min(QOf(), qOf() + TAIL_CAP + 0.1) - 0.05));
+    ctx.font = '10.5px system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+    for (let rAU = 1; rAU <= maxRing; rAU++) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, rAU * k, 0, Math.PI * 2);
+      ctx.strokeStyle = '#2c2c2a';             // hairline grid, solid, recessive
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      // ring label on the lower-right diagonal, surface-haloed for legibility
+      const lx = cx + rAU * k * Math.cos(-0.6);
+      const ly = cy - rAU * k * Math.sin(-0.6);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#1a1a19';
+      ctx.strokeText(rAU + ' AU', lx + 4, ly);
+      ctx.fillStyle = '#898781';
+      ctx.fillText(rAU + ' AU', lx + 4, ly);
+    }
+  }
+
+  function drawOrbit(cx, cy, k) {
+    ctx.beginPath();
+    ctx.ellipse(cx - A * e * k, cy, A * k, bOf() * k, 0, 0, Math.PI * 2);
+    ctx.strokeStyle = '#383835';               // hairline axis tone
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  function drawRadius(cx, cy, px, py) {
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(px, py);
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  /* anti-sunward unit vector (canvas coords) */
+  function antiSun(px, py, cx, cy) {
+    const dx = px - cx, dy = py - cy;
+    const m = Math.hypot(dx, dy) || 1;
+    return { x: dx / m, y: dy / m };
+  }
+
+  function drawIonTail(px, py, cx, cy, li, k) {
+    if (li * k < 6) return;                    // nothing visible at aphelion
+    const u = antiSun(px, py, cx, cy);
+    const L = li * k;
+    const nx = -u.y, ny = u.x;
+    const tipX = px + u.x * L, tipY = py + u.y * L;
+    const w = Math.min(9, 3 + L * 0.045);
+
+    // tapered wash
+    const g = ctx.createLinearGradient(px, py, tipX, tipY);
+    g.addColorStop(0, 'rgba(57,135,229,0.22)');
+    g.addColorStop(1, 'rgba(57,135,229,0)');
+    ctx.beginPath();
+    ctx.moveTo(px + nx * 1.5, py + ny * 1.5);
+    ctx.lineTo(tipX + nx * w, tipY + ny * w);
+    ctx.lineTo(tipX - nx * w, tipY - ny * w);
+    ctx.lineTo(px - nx * 1.5, py - ny * 1.5);
+    ctx.closePath();
+    ctx.fillStyle = g;
+    ctx.fill();
+
+    // 2px core line, fading
+    const g2 = ctx.createLinearGradient(px, py, tipX, tipY);
+    g2.addColorStop(0, 'rgba(57,135,229,0.85)');
+    g2.addColorStop(1, 'rgba(57,135,229,0.05)');
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(tipX, tipY);
+    ctx.strokeStyle = g2;
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  }
+
+  /* dust-tail direction: anti-sunward blended with the direction the comet
+     came FROM (dust grains keep their orbital motion; lag grows near the Sun).
+     s.mx/s.my are world coords (y up); canvas y is flipped, so the motion
+     vector converts to canvas as (mx, -my). */
+  function dustDir(s, cx, cy, px, py) {
+    const u = antiSun(px, py, cx, cy);
+    const lag = 0.35 + 0.5 * (1 - s.r / QOf());
+    const backX = -s.mx, backY = s.my;         // trailing direction, canvas coords
+    let dx = u.x + lag * backX, dy = u.y + lag * backY;
+    const dm = Math.hypot(dx, dy) || 1;
+    return { dx: dx / dm, dy: dy / dm, backX, backY, lag };
+  }
+
+  function drawDustTail(px, py, s, dd, ld, k) {
+    if (ld * k < 6) return;
+    const { dx, dy, backX, backY, lag } = dd;
+
+    const L = ld * k;
+    const curve = 0.30 * lag;                  // bend grows near the Sun
+    // unit vector perpendicular to the tail that points to the trailing side
+    let bx = backX - (backX * dx + backY * dy) * dx;
+    let by = backY - (backX * dx + backY * dy) * dy;
+    const bm = Math.hypot(bx, by) || 1;
+    bx /= bm; by /= bm;
+    const n = 22;
+    const left = [], right = [];
+    for (let i = 0; i <= n; i++) {
+      const f = i / n;
+      const cxp = px + dx * L * f + bx * curve * L * f * f;
+      const cyp = py + dy * L * f + by * curve * L * f * f;
+      const w = 1.5 + (18 - 1.5) * f * f;
+      const nx2 = -dy, ny2 = dx;
+      left.push([cxp + nx2 * w, cyp + ny2 * w]);
+      right.push([cxp - nx2 * w, cyp - ny2 * w]);
+    }
+    const g = ctx.createLinearGradient(px, py, px + dx * L, py + dy * L);
+    g.addColorStop(0, 'rgba(217,89,38,0.20)');
+    g.addColorStop(1, 'rgba(217,89,38,0)');
+    ctx.beginPath();
+    ctx.moveTo(left[0][0], left[0][1]);
+    for (const p of left) ctx.lineTo(p[0], p[1]);
+    for (let i = right.length - 1; i >= 0; i--) ctx.lineTo(right[i][0], right[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = g;
+    ctx.fill();
+
+    // 2px curved spine
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    for (let i = 1; i <= n; i++) {
+      const f = i / n;
+      ctx.lineTo(px + dx * L * f + bx * curve * L * f * f,
+                 py + dy * L * f + by * curve * L * f * f);
+    }
+    const g2 = ctx.createLinearGradient(px, py, px + dx * L, py + dy * L);
+    g2.addColorStop(0, 'rgba(217,89,38,0.75)');
+    g2.addColorStop(1, 'rgba(217,89,38,0.05)');
+    ctx.strokeStyle = g2;
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  }
+
+  function drawSun(cx, cy) {
+    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, 26);
+    glow.addColorStop(0, 'rgba(250,178,25,0.30)');
+    glow.addColorStop(1, 'rgba(250,178,25,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(cx, cy, 26, 0, Math.PI * 2); ctx.fill();
+    const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, 7);
+    core.addColorStop(0, '#fff7e6');
+    core.addColorStop(1, '#fab219');
+    ctx.fillStyle = core;
+    ctx.beginPath(); ctx.arc(cx, cy, 7, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function drawComet(px, py) {
+    // coma glow
+    const glow = ctx.createRadialGradient(px, py, 0, px, py, 16);
+    glow.addColorStop(0, 'rgba(160,200,255,0.45)');
+    glow.addColorStop(1, 'rgba(160,200,255,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(px, py, 16, 0, Math.PI * 2); ctx.fill();
+    // >=8px marker with a 2px surface ring
+    ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI * 2);
+    ctx.fillStyle = '#1a1a19'; ctx.fill();     // ring (surface colour)
+    ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff'; ctx.fill();
+  }
+
+  /* selective direct labels: at each tail tip, hidden when the tails are tiny */
+  function drawTailLabels(px, py, cx, cy, s, dd, li, ld, k) {
+    if (li * k < 34) return;
+    ctx.font = '11.5px system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+    const u = antiSun(px, py, cx, cy);
+    const lix = px + u.x * li * k, liy = py + u.y * li * k;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#1a1a19';
+    ctx.fillStyle = '#c3c2b7';                 // text wears text tokens, not series colour
+    ctx.strokeText('ion tail', lix + 8, liy - 6);
+    ctx.fillText('ion tail', lix + 8, liy - 6);
+    if (ld * k >= 34) {
+      const { dx, dy } = dd;
+      const dgx = px + dx * ld * k * 0.72, dgy = py + dy * ld * k * 0.72;
+      if (Math.hypot(dgx - lix, dgy - liy) > 26) {
+        ctx.strokeText('dust tail', dgx + 8, dgy + 10);
+        ctx.fillText('dust tail', dgx + 8, dgy + 10);
+      }
+    }
+  }
+
+  /* ---------- readouts ---------- */
+  function fmt(n, d) { return n.toFixed(d); }
+
+  function updateReadouts(s, li, ld) {
+    els.r.textContent = fmt(s.r, 2);
+    els.v.textContent = fmt(s.v, 1);
+    els.li.textContent = fmt(li, 2);
+    els.ld.textContent = fmt(ld, 2);
+    els.rSub.textContent = 'q ' + fmt(qOf(), 2) + ' AU · Q ' + fmt(QOf(), 2) + ' AU';
+    els.vSub.textContent = 'period ' + fmt(perYr(), 2) + ' yr';
+  }
+
+  function sampleLog(s, li, ld) {
+    if (tDays < nextSample) return;
+    nextSample += SAMPLE_DAYS;
+    const row = document.createElement('tr');
+    const cells = [
+      String(Math.round(tDays)), fmt(s.r, 2), fmt(s.v, 1), fmt(li, 2), fmt(ld, 2),
+    ];
+    for (const c of cells) {
+      const td = document.createElement('td');
+      td.textContent = c;                      // textContent, never innerHTML
+      row.appendChild(td);
+    }
+    els.log.prepend(row);
+    while (els.log.children.length > 9) els.log.removeChild(els.log.lastChild);
+  }
+
+  /* ---------- tooltip (hover + keyboard focus show the same values) ---------- */
+  let hovering = false;
+  let tipXY = null;                            // last pointer/focus position
+  function showTip(x, y) {
+    tipXY = [x, y];
+    refreshTip();
+  }
+  function refreshTip() {
+    if (!tipXY) return;
+    const [x, y] = tipXY;
+    const s = cometState();
+    const { li, ld } = tailLengths(s.r);
+    tip.replaceChildren();
+    const rows = [
+      ['sun',  'Sun → comet', fmt(s.r, 2) + ' AU'],
+      [null,   'velocity',         fmt(s.v, 1) + ' km/s'],
+      ['ion',  'ion tail',         fmt(li, 2) + ' AU'],
+      ['dust', 'dust tail',        fmt(ld, 2) + ' AU'],
+    ];
+    for (const [key, label, val] of rows) {
+      const div = document.createElement('div');
+      div.className = 'row';
+      if (key) { const i = document.createElement('i'); i.className = key; div.appendChild(i); }
+      const sp = document.createElement('span'); sp.textContent = label; div.appendChild(sp);
+      const b = document.createElement('b'); b.textContent = val; div.appendChild(b);
+      tip.appendChild(div);
+    }
+    const rect = wrap.getBoundingClientRect();
+    tip.style.left = Math.min(x - rect.left + 14, rect.width - 150) + 'px';
+    tip.style.top = Math.max(4, y - rect.top - 12) + 'px';
+    tip.classList.add('show');
+  }
+  function hideTip() { tipXY = null; tip.classList.remove('show'); }
+
+  canvas.addEventListener('pointermove', ev => { hovering = true; showTip(ev.clientX, ev.clientY); });
+  canvas.addEventListener('pointerleave', () => { hovering = false; hideTip(); });
+  canvas.addEventListener('focus', () => {
+    const rect = canvas.getBoundingClientRect();
+    showTip(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  });
+  canvas.addEventListener('blur', hideTip);
+
+  /* ---------- controls ---------- */
+  function setPaused(p) {
+    paused = p;
+    pauseB.textContent = p ? 'Play' : 'Pause';
+    pauseB.setAttribute('aria-pressed', String(p));
+  }
+  pauseB.addEventListener('click', () => setPaused(!paused));
+  resetB.addEventListener('click', () => { M = 0; tDays = 0; nextSample = 0; els.log.replaceChildren(); });
+
+  eccIn.addEventListener('input', () => {
+    e = parseFloat(eccIn.value);
+    els.eccOut.textContent = fmt(e, 2);
+    // orbit changed — past samples describe a different ellipse, so clear the log
+    tDays = 0; nextSample = 0; M = 0;
+    els.log.replaceChildren();
+  });
+  spdIn.addEventListener('input', () => {
+    speed = parseFloat(spdIn.value);
+    els.spdOut.textContent = speed + ' d/s';
+  });
+
+  /* ---------- animation loop ---------- */
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);  // clamp tab-switch jumps
+    last = now;
+    if (!paused) {
+      const dYears = (speed / 365.25) * dt;
+      M = (M + dYears * 2 * Math.PI) % (2 * Math.PI);
+      tDays += speed * dt;
+    }
+    const { s, li, ld } = render();
+    updateReadouts(s, li, ld);
+    if (!paused) sampleLog(s, li, ld);
+    if (hovering) refreshTip();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
