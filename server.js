@@ -44,7 +44,7 @@ const TASKS_MD = path.join(ORCH_DIR, 'tasks.md');
 // Lossless per-task context: parent task + full results, referenced from the
 // prompt by path instead of being truncated into it.
 const CONTEXTS_DIR = path.join(ORCH_DIR, 'contexts');
-const AGENTS_DIR = path.join(os.homedir(), '.claude', 'agents');
+const AGENTS_DIR = process.env.ORCH_AGENTS_DIR || path.join(os.homedir(), '.claude', 'agents');
 const HOME = os.homedir();
 
 // Same colors the UI has always used for these agents (CSS var names, so the
@@ -199,6 +199,9 @@ function stubAgentMd(name, description, model) {
     '- Do not spawn other agents yourself. If the task needs another agent, end your final message with a handoff line:',
     '  DISPATCH: <agent> | <exactly what they should do>',
     '  (optional third segment: `| model <model>; repo <path>`). The orchestrator board turns this into a real tracked task with your result as its context.',
+    '- Do not guess at decisions Prateek should make (design forks, trade-offs, scope changes). Instead, end your turn with a final line:',
+    '  ASK: <question> | <option A> | <option B>',
+    '  (options optional, up to 4). The board pauses the task until he answers, then this same session continues with the answer. Make ASK the ending of your turn — nothing after it; if you also need to hand off work (DISPATCH), do that after the answer comes back.',
     '',
   ].join('\n');
 }

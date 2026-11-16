@@ -48,8 +48,10 @@ export async function startServer({ reuse = null, seed = null, env = {} } = {}) 
   const tmpDir = reuse ? reuse.tmpDir : fs.mkdtempSync(path.join(os.tmpdir(), 'orch-test-'));
   const orchDir = path.join(tmpDir, 'orch');
   const binDir = path.join(tmpDir, 'bin');
+  const agentsDir = path.join(tmpDir, 'agents');
   fs.mkdirSync(orchDir, { recursive: true });
   fs.mkdirSync(binDir, { recursive: true });
+  fs.mkdirSync(agentsDir, { recursive: true });
 
   // Copy the server + parser + public assets into isolation.
   fs.copyFileSync(path.join(REPO, 'server.js'), path.join(tmpDir, 'server.js'));
@@ -88,6 +90,7 @@ export async function startServer({ reuse = null, seed = null, env = {} } = {}) 
       ...process.env,
       ORCH_PORT: String(port),
       ORCH_DIR: orchDir,
+      ORCH_AGENTS_DIR: agentsDir,
       ORCH_CONCURRENCY: env.ORCH_CONCURRENCY || process.env.ORCH_CONCURRENCY || '3',
       PATH: `${binDir}:${process.env.PATH}`,
       FAKE_SCENARIOS: scenFile,
@@ -101,7 +104,7 @@ export async function startServer({ reuse = null, seed = null, env = {} } = {}) 
   for (let i = 0; i < 25; i++) {
     if (await healthOk(port)) {
       return {
-        port, tmpDir, orchDir, stateFile: path.join(tmpDir, 'state.json'),
+        port, tmpDir, orchDir, agentsDir, stateFile: path.join(tmpDir, 'state.json'),
         child, argsLogFile, scenFile,
         serverLog: () => serverLog,
         setScenario(invocations) {

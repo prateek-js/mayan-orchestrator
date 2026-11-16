@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import { startServer, seedTask, waitFor, plantTranscript, SESSION_ID, TASK_ID } from './helpers.mjs';
@@ -139,11 +140,19 @@ test('empty answer rejected, task stays waiting', async () => {
 test('answer after agent renamed → 400 naming the agent', async () => {
   const s = await startServer({ seed: waitingSeed() });
   try {
+    // A definition file in the sandbox agents dir, so the rename has a file
+    // to move — and so the test proves renames stay inside the sandbox
+    // (regression guard for the 2026-11-16 incident where a test renamed
+    // the real ~/.claude/agents/tony-stark.md).
+    fs.writeFileSync(path.join(s.agentsDir, 'tony-stark.md'), '---\nname: tony-stark\ndescription: sandbox\nmodel: test-model\n---\n\nbody\n');
     const patch = await fetch(url(s, '/api/agents/tony-stark'), {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'renamed-agent' }),
+      body: JSON.stringify({ name: 'renamed-nine' }),
     });
     assert.equal(patch.status, 200);
+    assert.ok(fs.existsSync(path.join(s.agentsDir, 'renamed-nine.md')), 'file renamed inside the sandbox');
+    assert.equal(fs.existsSync(path.join(s.agentsDir, 'tony-stark.md')), false);
+    assert.equal(fs.existsSync(path.join(os.homedir(), '.claude', 'agents', 'renamed-nine.md')), false, 'never the real dir');
     const r = await fetch(url(s, `/api/tasks/${TASK_ID}/answer`), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: 'hello' }),

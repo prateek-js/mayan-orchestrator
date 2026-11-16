@@ -200,3 +200,20 @@ test('handoff + ask same message: waiting now, handoff queued only on done', asy
     await s.stop();
   }
 });
+
+test('new agent stub teaches the ASK protocol', async () => {
+  const s = await startServer();
+  try {
+    const r = await fetch(url(s, '/api/agents'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'temp-ask-probe', defModel: 'test-model', description: 'temporary' }),
+    });
+    assert.equal(r.status, 201);
+    const md = fs.readFileSync(path.join(s.agentsDir, 'temp-ask-probe.md'), 'utf8');
+    assert.ok(md.includes('ASK:'), 'stub definition carries the ASK protocol');
+    const del = await fetch(url(s, '/api/agents/temp-ask-probe'), { method: 'DELETE' });
+    assert.equal(del.status, 200);
+  } finally {
+    await s.stop();
+  }
+});
