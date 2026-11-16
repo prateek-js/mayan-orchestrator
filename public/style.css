@@ -17,6 +17,7 @@
   --ok: #3fc98c;
   --warn: #e8c352;
   --bad: #ff5d5d;
+  --ask: #4dd0e1;
 }
 
 * { box-sizing: border-box; }
@@ -261,11 +262,49 @@ textarea { resize: vertical; min-height: 110px; }
 .st-done      { --st: var(--ok); }
 .st-failed    { --st: var(--bad); }
 .st-cancelled { --st: var(--faint); }
+.st-waiting   { --st: var(--ask); }
 .st-queued .card-status   { color: var(--faint); }
 .st-running .card-status  { color: var(--warn); }
 .st-done .card-status    { color: var(--ok); }
 .st-failed .card-status  { color: var(--bad); }
 .st-cancelled .card-status { color: var(--faint); }
+.st-waiting .card-status { color: var(--ask); }
+
+/* ------------------------------------------------------ waiting strip ---- */
+
+.waiting-strip {
+  background: var(--panel);
+  border: 1px solid var(--line-soft);
+  border-top: 2px solid var(--ask);
+  border-radius: 3px;
+  margin-bottom: 14px;
+}
+.strip-head {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 9px 12px 7px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.strip-title { color: var(--ask); font-weight: 700; }
+.strip-hint { color: var(--faint); font-size: 11px; }
+.strip-cards {
+  padding: 8px;
+  display: flex; flex-wrap: wrap; gap: 8px;
+}
+.strip-cards .card { flex: 1 1 300px; max-width: 460px; }
+.card-agent { color: var(--dim); font-size: 11px; display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.card-agent .dot { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+.card-question {
+  color: var(--text); font-size: 12px; margin-top: 5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ask-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.ask-chip {
+  background: none; border: 1px solid var(--line); border-radius: 3px;
+  color: var(--dim); font-size: 11px; padding: 3px 10px; cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.ask-chip:hover { border-color: var(--ask); color: var(--ask); }
+.ask-chip.other { border-style: dashed; }
 
 /* ------------------------------------------------------------- ledger ---- */
 
@@ -352,6 +391,17 @@ td.t-act button:hover { color: var(--text); border-color: var(--dim); }
 .drawer-activity .kind.k-log { color: var(--faint); }
 .drawer-activity .txt { color: var(--text); min-width: 0; word-break: break-word; white-space: pre-wrap; }
 .drawer-activity .txt.muted { color: var(--dim); }
+
+/* question/answer history in the drawer (same line grammar as activity) */
+.drawer-qa { display: flex; flex-direction: column; gap: 2px; font-size: 12px; margin-bottom: 12px; }
+.drawer-qa .line { display: flex; gap: 8px; align-items: baseline; }
+.drawer-qa .at { color: var(--faint); font-size: 10px; flex: none; font-variant-numeric: tabular-nums; }
+.drawer-qa .kind { flex: none; width: 40px; }
+.drawer-qa .kind.k-ask { color: var(--ask); }
+.drawer-qa .kind.k-ans { color: var(--ok); }
+.drawer-qa .txt { color: var(--text); min-width: 0; word-break: break-word; white-space: pre-wrap; }
+.drawer-answer { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
+.drawer-answer textarea { min-height: 64px; }
 .drawer-result {
   background: var(--ink); border: 1px solid var(--line-soft); border-radius: 3px;
   padding: 10px 12px; font-size: 12px; white-space: pre-wrap; word-break: break-word;

@@ -117,14 +117,115 @@ function tasksForLane(agent) {
 }
 function finishedTasks() {
   return S.tasks
-    .filter(t => !['queued', 'running'].includes(t.status))
+    .filter(t => !['queued', 'running', 'waiting'].includes(t.status))
     .sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0));
+}
+
+// -------------------------------------------------------------- waiting ----
+// Waiting tasks live in their own strip above the lanes, never inside an
+// agent lane — questions are the one thing on the board that need Prateek,
+// and a renamed/removed agent must never hide one.
+
+function waitingTasks() {
+  return S.tasks
+    .filter(t => t.status === 'waiting')
+    .sort((a, b) => (a.ask?.askedAt || 0) - (b.ask?.askedAt || 0));
+}
+
+function answerTask(t, text) {
+  api('POST', `/api/tasks/${t.id}/answer`, { text })
+    .catch(e => {
+      const head = $('#waiting-strip .strip-head');
+      if (head) head.textContent = `answer failed: ${e.message}`;
+    });
+}
+
+function renderWaiting() {
+  const strip = $('#waiting-strip');
+  const list = waitingTasks();
+  strip.hidden = list.length === 0;
+  strip.innerHTML = '';
+  if (!list.length) return;
+
+  const head = document.createElement('div');
+  head.className = 'strip-head';
+  head.innerHTML = `<span class="strip-title">waiting — ${list.length}</span><span class="strip-hint">click an option to answer; the task resumes in its lane</span>`;
+  strip.appendChild(head);
+
+  const row = document.createElement('div');
+  row.className = 'strip-cards';
+  for (const t of list) row.appendChild(cardForWaiting(t));
+  strip.appendChild(row);
+}
+
+function cardForWaiting(t) {
+  const card = document.createElement('div');
+  card.className = 'card st-waiting';
+  card.dataset.id = t.id;
+
+  const top = document.createElement('div');
+  top.className = 'card-top';
+  top.innerHTML = `<span class="card-id">${esc(t.id)}</span><span class="spacer"></span><span class="card-status">${esc(t.status)}</span>`;
+  card.appendChild(top);
+
+  const agentLine = document.createElement('div');
+  agentLine.className = 'card-agent';
+  agentLine.innerHTML = `<span class="dot" style="background:${agentColor(t.agent)}"></span>${esc(t.agent)}`;
+  card.appendChild(agentLine);
+
+  const task = document.createElement('div');
+  task.className = 'card-task';
+  task.textContent = t.task;
+  card.appendChild(task);
+
+  if (t.ask?.question) {
+    const q = document.createElement('div');
+    q.className = 'card-question';
+    q.textContent = `❓ ${t.ask.question}`;
+    card.appendChild(q);
+  }
+
+  const chips = document.createElement('div');
+  chips.className = 'ask-chips';
+  for (const opt of (t.ask?.options || []).slice(0, 4)) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ask-chip';
+    b.textContent = opt;
+    b.addEventListener('click', (e) => { e.stopPropagation(); answerTask(t, opt); });
+    chips.appendChild(b);
+  }
+  const other = document.createElement('button');
+  other.type = 'button';
+  other.className = 'ask-chip other';
+  other.textContent = 'other…';
+  other.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openDrawer(t.id);
+    const ta = $('#drawer-answer');
+    if (ta) ta.focus();
+  });
+  chips.appendChild(other);
+  card.appendChild(chips);
+
+  const meta = document.createElement('div');
+  meta.className = 'card-meta';
+  const bits = [];
+  if (t.repo) bits.push(`<span class="repo">${esc(shortRepo(t.repo))}</span>`);
+  bits.push(`<span class="model">${esc(MODEL_SHORT(t.model))}</span>`);
+  if (t.ask?.askedAt) bits.push(`<span class="elapsed">waiting ${fmtDur(Date.now() - t.ask.askedAt)}</span>`);
+  meta.innerHTML = bits.join('');
+  card.appendChild(meta);
+
+  card.addEventListener('click', () => openDrawer(t.id));
+  return card;
 }
 
 // ---------------------------------------------------------------- render ---
 
 function render() {
   renderChips();
+  renderWaiting();
   renderLanes();
   renderLedger();
   renderConc();
@@ -134,7 +235,8 @@ function render() {
 function renderConc() {
   const running = S.tasks.filter(t => t.status === 'running').length;
   const queued = S.tasks.filter(t => t.status === 'queued').length;
-  $('#conc').innerHTML = `slots <b>${running}/${S.concurrency}</b> · queued <b>${queued}</b>`;
+  const waiting = S.tasks.filter(t => t.status === 'waiting').length;
+  $('#conc').innerHTML = `slots <b>${running}/${S.concurrency}</b> · queued <b>${queued}</b>${waiting ? ` · waiting <b>${waiting}</b>` : ''}`;
 }
 
 function renderChips() {
@@ -348,10 +450,57 @@ function renderDrawer() {
   else if (t.error) { res.textContent = 'error: ' + t.error; res.hidden = false; }
   else { res.textContent = ''; res.hidden = true; }
 
+  // Question/answer history plus the live answer form while waiting.
+  const qaHead = $('#drawer-qa-head');
+  const qaBody = $('#drawer-qa');
+  const answerWrap = $('#drawer-answer-wrap');
+  const rounds = Array.isArray(t.qa) ? t.qa : [];
+  const liveQ = t.status === 'waiting' && t.ask ? [{ q: t.ask.question, a: null }] : [];
+  if (rounds.length || liveQ.length) {
+    qaHead.hidden = false;
+    qaBody.hidden = false;
+    qaBody.innerHTML = '';
+    for (const r of [...rounds, ...liveQ]) {
+      const qRow = document.createElement('div');
+      qRow.className = 'line';
+      qRow.innerHTML = `<span class="at">${r.at ? fmtClock(r.at).hm : ''}</span><span class="kind k-ask">ask</span><span class="txt"></span>`;
+      qRow.querySelector('.txt').textContent = r.q;
+      qaBody.appendChild(qRow);
+      if (r.a != null) {
+        const aRow = document.createElement('div');
+        aRow.className = 'line';
+        aRow.innerHTML = `<span class="at"></span><span class="kind k-ans">you</span><span class="txt"></span>`;
+        aRow.querySelector('.txt').textContent = r.a;
+        qaBody.appendChild(aRow);
+      }
+    }
+  } else {
+    qaHead.hidden = true;
+    qaBody.hidden = true;
+    qaBody.innerHTML = '';
+  }
+  if (answerWrap) {
+    answerWrap.hidden = t.status !== 'waiting';
+    if (t.status === 'waiting') {
+      const ta = $('#drawer-answer');
+      ta.value = '';
+      const send = $('#drawer-answer-send');
+      send.onclick = () => {
+        const text = ta.value.trim();
+        if (!text) return;
+        send.disabled = true;
+        api('POST', `/api/tasks/${t.id}/answer`, { text })
+          .then(() => { ta.value = ''; })
+          .catch(e => { ta.value = text; $('#form-msg')?.replaceChildren(); console.error(e.message); })
+          .finally(() => { send.disabled = false; });
+      };
+    }
+  }
+
   const actions = $('#drawer-actions');
   if (actions) {
     actions.innerHTML = '';
-    if (['queued', 'running'].includes(t.status)) {
+    if (['queued', 'running', 'waiting'].includes(t.status)) {
       const btn = document.createElement('button');
       btn.className = 'ghost';
       btn.textContent = 'cancel task';
@@ -860,8 +1009,9 @@ function initTeamsBody() {
   $('#board-name').textContent = S.boardName || 'orchestrator';
   document.title = S.boardName || 'orchestrator';
   render();
-  // periodic elapsed-time refresh on running cards
+  // periodic elapsed-time refresh on running cards + waiting durations
   setInterval(() => {
     if (S.tasks.some(t => t.status === 'running')) renderLanes();
+    if (S.tasks.some(t => t.status === 'waiting')) renderWaiting();
   }, 1000);
 })();
