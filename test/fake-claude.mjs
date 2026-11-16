@@ -20,12 +20,23 @@ if (!scenFile || !argsLogFile) {
 fs.appendFileSync(argsLogFile, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }) + '\n');
 
 let events = [];
+let sleepMs = 0;
 try {
   const all = JSON.parse(fs.readFileSync(scenFile, 'utf8'));
   events = Array.isArray(all) && Array.isArray(all[0]) ? all.shift() : [];
   fs.writeFileSync(scenFile, JSON.stringify(all));
+  // A scenario may open with {__sleep_ms: N} to hold the slot without
+  // finishing — the slots-respected test uses this to keep 3 slots busy.
+  if (events.length && events[0] && events[0].__sleep_ms) {
+    sleepMs = events[0].__sleep_ms;
+    events = events.slice(1);
+  }
 } catch (e) { /* no scenarios left — emit nothing, exit 0 */ }
 
 const out = events.map(e => JSON.stringify(e)).join('\n') + (events.length ? '\n' : '');
 if (out) process.stdout.write(out);
-process.exit(0);
+if (sleepMs) {
+  setTimeout(() => process.exit(0), sleepMs);
+} else {
+  process.exit(0);
+}

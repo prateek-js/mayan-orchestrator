@@ -35,7 +35,7 @@ function healthOk(port) {
   });
 }
 
-export async function startServer({ reuse = null, seed = null } = {}) {
+export async function startServer({ reuse = null, seed = null, env = {} } = {}) {
   // Guard: never test the live board by accident. ORCH_TEST_ALLOW_7171=1
   // opts out for machines where the real board always runs — the guard's
   // point is catching *accidental* 7171 contact, not forbidding coexistence.
@@ -88,7 +88,7 @@ export async function startServer({ reuse = null, seed = null } = {}) {
       ...process.env,
       ORCH_PORT: String(port),
       ORCH_DIR: orchDir,
-      ORCH_CONCURRENCY: process.env.ORCH_CONCURRENCY || '3',
+      ORCH_CONCURRENCY: env.ORCH_CONCURRENCY || process.env.ORCH_CONCURRENCY || '3',
       PATH: `${binDir}:${process.env.PATH}`,
       FAKE_SCENARIOS: scenFile,
       FAKE_ARGS_LOG: argsLogFile,

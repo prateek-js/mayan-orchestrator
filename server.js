@@ -465,6 +465,12 @@ function findClaude() {
 const running = new Map();   // id -> child process
 const cancelling = new Set();
 
+// Prompt line teaching agents the ASK protocol (injected on every leg —
+// fresh, resume, answer). Real text filled in the next task.
+const ASK_HINT = '[Board: if a decision needs Prateek, end your turn with a final line\n' +
+  '"ASK: <question> | <option> | <option>" — the task pauses for his answer\n' +
+  'and this session continues afterward. Never guess and never ask mid-run.]';
+
 // Priority picks first (user-flagged tasks jump the line), then FIFO.
 // Within a lane the global FIFO order is kept so follow-up chains still run
 // ahead of unrelated later work.
@@ -555,6 +561,9 @@ function findArtifacts(task, startedAt) {
 }
 
 function startTask(task) {
+  // The cwd the previous leg ran in — answer legs check the session
+  // transcript against THIS, not against the new leg's cwd.
+  const prevCwd = task.cwd;
   task.status = 'running';
   task.startedAt = Date.now();
   task.activity = [];
@@ -580,9 +589,18 @@ function startTask(task) {
 
   // Resume keeps the agent's full memory of a previous run in this repo —
   // only valid when the session transcript still exists on disk. Follow-ups
-  // (followTo) resume that session; a retry resumes its own last session.
+  // (followTo) resume that session; a retry resumes its own last session;
+  // an answer leg resumes the same task's session (same session id across
+  // legs — verified by probe 2026-11-16).
   let resumeId = null;
-  if (task.followTo || task.retryOf) {
+  if (task.answerText) {
+    if (task.sessionId && sessionTranscriptExists(task.sessionId, prevCwd || task.cwd)) {
+      resumeId = task.sessionId;
+      task.resumeSessionId = resumeId;
+    } else if (!task.contextFile) {
+      addActivity(task, 'sys', 'session transcript not found — answer runs fresh with a context file instead');
+    }
+  } else if (task.followTo || task.retryOf) {
     const src = getTask(task.followTo || task.retryOf);
     if (src && src.sessionId && sessionTranscriptExists(src.sessionId, src.cwd)) {
       resumeId = src.sessionId;
@@ -593,12 +611,23 @@ function startTask(task) {
   }
 
   // Fresh runs carry the lossless context file when one was written for them.
+  // An answer leg carries Prateek's reply instead of (or atop) the task text.
   const promptParts = [];
-  if (!resumeId && task.contextFile) promptParts.push(`Read ${task.contextFile} first — it has the full task background (parent task and complete result). Then:`);
+  if (task.answerText) {
+    if (resumeId) {
+      promptParts.push(task.answerText);
+    } else {
+      promptParts.push(`Read ${task.contextFile} first — it has the full task, the prior result, and the question/answer history. Prateek answered your question — continue the task:`);
+      promptParts.push(task.answerText);
+    }
+  } else {
+    if (!resumeId && task.contextFile) promptParts.push(`Read ${task.contextFile} first — it has the full task background (parent task and complete result). Then:`);
+    promptParts.push(task.task);
+  }
   if (task.repo) promptParts.push(`Repo: ${task.repo}`);
-  promptParts.push(task.task);
   // Roster is injected live so DISPATCH handoffs never reference stale names.
   promptParts.push(`[Board agents: ${rosterNames()} — hand off with a final line "DISPATCH: <agent> | <what to do>"]`);
+  promptParts.push(ASK_HINT);
 
   const args = [
     ...(resumeId ? ['--resume', resumeId] : []),
@@ -610,7 +639,7 @@ function startTask(task) {
     '--permission-mode', task.autoApprove ? 'bypassPermissions' : 'acceptEdits',
   ];
 
-  log(`dispatch ${task.id} agent=${task.agent} model=${task.model} cwd=${cwd}${resumeId ? ` resume=${resumeId.slice(0, 8)}` : ''}`);
+  log(`dispatch ${task.id} agent=${task.agent} model=${task.model} cwd=${cwd}${resumeId ? ` resume=${resumeId.slice(0, 8)}` : ''}${task.answerText ? ' (answer leg, ' + (resumeId ? 'resume' : 'fresh') + ')' : ''}`);
   addActivity(task, 'sys', `dispatched to ${task.agent} (${task.model})${task.autoApprove ? ' · tools auto-approved' : ''}${resumeId ? ' · resuming session ' + resumeId.slice(0, 8) : ''}`);
 
   let child;
@@ -681,8 +710,11 @@ function startTask(task) {
       } else if (ev.type === 'result') {
         task.result = typeof ev.result === 'string' ? ev.result.slice(0, 8000) : null;
         task.isError = !!ev.is_error;
+        // total_cost_usd is session-cumulative (probe 2026-11-16): assign,
+        // never sum — a resumed leg reports the whole session's cost.
         if (typeof ev.total_cost_usd === 'number') task.costUsd = ev.total_cost_usd;
-        if (typeof ev.duration_ms === 'number') task.durationMs = ev.duration_ms;
+        // duration_ms is per-invocation: sum across legs.
+        if (typeof ev.duration_ms === 'number') task.durationMs = (task.durationMs || 0) + ev.duration_ms;
         if (ev.is_error && !task.error && typeof ev.result === 'string') task.error = ev.result.slice(0, 300);
       }
     }
@@ -738,7 +770,7 @@ function startTask(task) {
       task.status = 'failed';
       if (!task.error) task.error = `exited with code ${code}${signal ? ` (${signal})` : ''}`;
     }
-    if (!task.durationMs) task.durationMs = task.finishedAt - task.startedAt;
+    if (!task.durationMs) task.durationMs = (task.durationMs || 0) + (task.finishedAt - task.startedAt);
 
     if (task.status === 'done' && cwd) await attachGitSnapshot(task, cwd);
     if (task.status === 'done') findArtifacts(task, task.startedAt);
@@ -916,6 +948,60 @@ function retryTask(task) {
     contextFile: task.contextFile,
     priority: task.priority,
   });
+}
+
+// Answer context for a leg that cannot resume: everything the agent needs —
+// its task, its prior result, and the whole question/answer chain.
+function writeAnswerContext(task) {
+  try {
+    fs.mkdirSync(CONTEXTS_DIR, { recursive: true });
+    const lines = [
+      `# Context: ${task.id} (answered task, session transcript gone)`,
+      '',
+      `## Task ${task.id} — ${task.agent} (${task.model})`,
+      `Repo: ${task.repo || '(none)'}`,
+      '',
+      '### Full task',
+      task.task,
+      '',
+      '### Result before the question',
+      task.result || '(no result captured)',
+      '',
+      '### Questions and answers',
+    ];
+    for (const round of task.qa || []) {
+      lines.push(`Q: ${round.q}`, `A (Prateek): ${round.a}`, '');
+    }
+    const file = path.join(CONTEXTS_DIR, task.id + '.md');
+    fs.writeFileSync(file, lines.join('\n'));
+    return file;
+  } catch (e) {
+    log(`answer context write failed for ${task.id}: ${e.message}`);
+    return null;
+  }
+}
+
+// Prateek answered a waiting task: record the round, requeue at priority,
+// and let dispatchLoop spawn the resume (or fresh fallback) leg.
+function answerTask(task, text) {
+  if (task.status !== 'waiting') return { error: `cannot answer a ${task.status} task`, code: 409 };
+  if (!text || !String(text).trim()) return { error: 'answer text is required', code: 400 };
+  if (!getAgent(task.agent)) {
+    return { error: `agent "${task.agent}" no longer exists on the board — re-add it in teams, or cancel the task`, code: 400 };
+  }
+  task.qa.push({ q: task.ask.question, a: String(text).trim(), at: Date.now() });
+  task.ask = null;
+  task.priority = 1;
+  task.answerText = '[answer from Prateek] ' + String(text).trim();
+  task.status = 'queued';
+  if (!sessionTranscriptExists(task.sessionId, task.cwd)) {
+    task.contextFile = writeAnswerContext(task);
+  }
+  addActivity(task, 'sys', 'answer received — requeued at priority');
+  log(`answer ${task.id}: requeued at priority`);
+  saveState(); broadcastSoon();
+  dispatchLoop();
+  return { task };
 }
 
 // ------------------------------------------------------- tasks.md log -----
@@ -1160,13 +1246,18 @@ const server = http.createServer(async (req, res) => {
       sendJSON(res, 201, task);
       return;
     }
-    const m = p.match(/^\/api\/tasks\/(t-[0-9a-f]+)\/(cancel|retry)$/);
+    const m = p.match(/^\/api\/tasks\/(t-[0-9a-f]+)\/(cancel|retry|answer)$/);
     if (req.method === 'POST' && m) {
       const task = getTask(m[1]);
       if (!task) { sendJSON(res, 404, { error: 'no such task' }); return; }
       if (m[2] === 'cancel') {
         if (!cancelTask(task)) { sendJSON(res, 409, { error: `cannot cancel a ${task.status} task` }); return; }
         sendJSON(res, 200, task);
+      } else if (m[2] === 'answer') {
+        const body = await readBody(req);
+        const r = answerTask(task, String(body.text || ''));
+        if (r.error) { sendJSON(res, r.code, { error: r.error }); return; }
+        sendJSON(res, 200, r.task);
       } else {
         if (!['done', 'failed', 'cancelled'].includes(task.status)) { sendJSON(res, 409, { error: `cannot retry a ${task.status} task` }); return; }
         if (!getAgent(task.agent)) { sendJSON(res, 400, { error: `agent "${task.agent}" no longer exists — rename the task's agent in teams, or dispatch fresh` }); return; }
